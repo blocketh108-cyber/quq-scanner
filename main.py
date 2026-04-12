@@ -15,6 +15,8 @@ app = FastAPI(title="QUQ Alpha Scanner")
 API_KEYS = [k.strip() for k in os.environ.get("BSCSCAN_API_KEYS", "").split(",") if k.strip()]
 if not API_KEYS:
     print("WARNING: BSCSCAN_API_KEYS not set. Scanning will fail.")
+else:
+    print(f"Loaded {len(API_KEYS)} API key(s)")
 MAX_ADDRESSES = 50
 MAX_CONCURRENT_TASKS = 3
 
@@ -50,6 +52,11 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str]):
         tasks[task_id]['error'] = str(e)
     finally:
         task_semaphore.release()
+
+
+@app.get("/api/health")
+def health():
+    return {"keys_loaded": len(API_KEYS), "max_addresses": MAX_ADDRESSES}
 
 
 @app.post("/api/scan")
