@@ -1,0 +1,165 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>QUQ Alpha 扫描器</title><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e0e0e0;padding:20px;max-width:1200px;margin:0 auto}
+h1{color:#fff;margin-bottom:8px;font-size:24px}
+.subtitle{color:#9ca3af;margin-bottom:20px;font-size:14px}
+.input-section{background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:24px;margin-bottom:24px}
+.input-section label{color:#fff;font-size:14px;display:block;margin-bottom:8px}
+textarea{width:100%;height:180px;background:#111827;border:1px solid #374151;border-radius:10px;color:#fff;font-family:monospace;font-size:13px;padding:12px;resize:vertical}
+textarea::placeholder{color:#555}
+.controls{display:flex;gap:12px;align-items:center;margin-top:14px;flex-wrap:wrap}
+.controls input[type=date]{padding:9px 12px;border-radius:10px;border:1px solid #374151;background:#111827;color:#fff;font-size:14px}
+.btn{padding:10px 20px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s}
+.btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.hint{color:#666;font-size:12px;margin-top:8px}
+
+.progress-section{display:none;background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:20px;margin-bottom:24px}
+.progress-bar-outer{width:100%;height:24px;background:#252540;border-radius:12px;overflow:hidden;margin:10px 0}
+.progress-bar-inner{height:100%;background:linear-gradient(90deg,#2563eb,#4ade80);border-radius:12px;transition:width .3s;min-width:0}
+.progress-text{color:#9ca3af;font-size:13px;text-align:center}
+
+.stat-cards{display:flex;flex-wrap:wrap;gap:15px;margin-bottom:20px}
+.stat-card{background:#1a1a2e;border:1px solid #333;border-radius:10px;padding:15px 25px;min-width:140px}
+.stat-card .label{color:#888;font-size:13px;margin-bottom:5px}
+.stat-card .value{color:#fff;font-size:22px;font-weight:bold}
+.stat-card .value.green{color:#4ade80}.stat-card .value.red{color:#f87171}
+
+.results-section{display:none}
+.toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.search-input,.sort-select{padding:9px 12px;border-radius:10px;border:1px solid #374151;background:#111827;color:#fff;font-size:14px}
+
+table{width:100%;border-collapse:collapse;background:#1a1a2e;border-radius:10px;overflow:hidden}
+th{background:#252540;color:#fff;padding:12px 15px;text-align:left;font-size:13px;border-bottom:1px solid #333}
+td{padding:10px 15px;font-size:14px;border-bottom:1px solid #222}
+tr:hover{background:#252540}
+.addr{color:#60a5fa;font-size:12px;word-break:break-all}
+.usdt{color:#4ade80}.wear{color:#facc15}
+.high{background:#16a34a;color:#fff;padding:2px 8px;border-radius:10px;font-size:12px}
+.zero{color:#555}
+.error-msg{color:#f87171;margin-top:12px;font-size:14px}
+</style></head><body>
+<h1>🦞 QUQ Alpha 扫描器</h1>
+<div class="subtitle">粘贴 BSC 地址，扫描当天 QUQ 交易磨损数据</div>
+
+<div class="input-section">
+  <label>地址列表（每行一个，最多 50 个）</label>
+  <textarea id="addrInput" placeholder="0x1234...&#10;0x5678...&#10;每行一个 BSC 地址"></textarea>
+  <div class="controls">
+    <label style="color:#9ca3af;font-size:13px">扫描日期：</label>
+    <input type="date" id="dayInput">
+    <button class="btn btn-primary" id="scanBtn" onclick="startScan()">🔍 开始扫描</button>
+  </div>
+  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8）</div>
+</div>
+
+<div class="progress-section" id="progressSection">
+  <div style="color:#fff;font-size:15px;font-weight:600" id="progressTitle">扫描中...</div>
+  <div class="progress-bar-outer"><div class="progress-bar-inner" id="progressBar"></div></div>
+  <div class="progress-text" id="progressText">0 / 0</div>
+</div>
+
+<div class="error-msg" id="errorMsg"></div>
+
+<div class="results-section" id="resultsSection">
+  <div class="stat-cards">
+    <div class="stat-card"><div class="label">活跃地址</div><div class="value" id="statActive">-</div></div>
+    <div class="stat-card"><div class="label">总买入</div><div class="value green" id="statBuy">-</div></div>
+    <div class="stat-card"><div class="label">总卖出</div><div class="value" id="statSell">-</div></div>
+    <div class="stat-card"><div class="label">总磨损</div><div class="value red" id="statWear">-</div></div>
+  </div>
+  <div class="toolbar">
+    <input id="searchInput" class="search-input" placeholder="搜索地址" oninput="renderTable()">
+    <select id="sortSelect" class="sort-select" onchange="renderTable()">
+      <option value="order">输入顺序</option>
+      <option value="points_desc">积分从高到低</option>
+      <option value="wear_desc">磨损绝对值从高到低</option>
+      <option value="buy_desc">买入从高到低</option>
+    </select>
+  </div>
+  <table><thead><tr>
+    <th>#</th><th>地址</th><th>买入</th><th>卖出</th><th>磨损</th><th>积分</th>
+  </tr></thead><tbody id="tableBody"></tbody></table>
+</div>
+
+<script>
+// Set default date to today (UTC+8)
+const now = new Date(Date.now() + 8*3600000);
+const h = now.getUTCHours();
+const d = h >= 8 ? now : new Date(now - 86400000);
+dayInput.value = d.toISOString().slice(0,10);
+
+let allResults = [], taskId = null, pollTimer = null;
+
+function money(v){return '$'+Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+function signedMoney(v){const n=Number(v||0);return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+
+async function startScan(){
+  errorMsg.textContent='';
+  const lines = addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean);
+  if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
+  if(lines.length>50){errorMsg.textContent='最多支持 50 个地址';return}
+  scanBtn.disabled=true;
+  try{
+    const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addresses:lines,day:dayInput.value||null})});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.detail||'请求失败');
+    taskId=data.task_id;
+    progressSection.style.display='block';
+    resultsSection.style.display='none';
+    progressBar.style.width='0%';
+    progressText.textContent=`0 / ${data.total}`;
+    pollStatus();
+  }catch(e){errorMsg.textContent=String(e);scanBtn.disabled=false}
+}
+
+async function pollStatus(){
+  if(!taskId)return;
+  try{
+    const res=await fetch(`/api/status/${taskId}`);
+    const s=await res.json();
+    const pct=s.total?Math.round(s.progress/s.total*100):0;
+    progressBar.style.width=pct+'%';
+    progressText.textContent=`${s.progress} / ${s.total}`;
+    progressTitle.textContent=s.status==='running'?'扫描中...':s.status==='queued'?'排队中...':'完成';
+    if(s.status==='done'){
+      await loadResults();scanBtn.disabled=false;return;
+    }
+    if(s.status==='error'){
+      errorMsg.textContent=s.error||'扫描失败';scanBtn.disabled=false;progressSection.style.display='none';return;
+    }
+  }catch(e){}
+  setTimeout(pollStatus,2000);
+}
+
+async function loadResults(){
+  const res=await fetch(`/api/results/${taskId}`);
+  const data=await res.json();
+  allResults=data.results||[];
+  progressSection.style.display='none';
+  resultsSection.style.display='block';
+  updateStats();renderTable();
+}
+
+function updateStats(){
+  let active=0,buy=0,sell=0,wear=0;
+  allResults.forEach(r=>{if(r.points>0)active++;buy+=r.usdt_in;sell+=r.usdt_out;wear+=r.wear});
+  statActive.textContent=active;statBuy.textContent=money(buy);statSell.textContent=money(sell);statWear.textContent=signedMoney(wear);
+}
+
+function renderTable(){
+  let rows=[...allResults];
+  const q=(searchInput.value||'').toLowerCase();
+  if(q)rows=rows.filter(r=>(r.fullAddr||r.addr||'').toLowerCase().includes(q));
+  const sort=sortSelect.value;
+  if(sort==='points_desc')rows.sort((a,b)=>b.points-a.points);
+  else if(sort==='wear_desc')rows.sort((a,b)=>Math.abs(b.wear)-Math.abs(a.wear));
+  else if(sort==='buy_desc')rows.sort((a,b)=>b.usdt_in-a.usdt_in);
+  const tbody=tableBody;tbody.innerHTML='';
+  rows.forEach((r,i)=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td>`;
+    tbody.appendChild(tr);
+  });
+}
+</script></body></html>

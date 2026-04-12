@@ -1,0 +1,9 @@
+version: "3.8"
+services:
+  scanner:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - BSCSCAN_API_KEYS=${BSCSCAN_API_KEYS}
+    restart: unless-stopped

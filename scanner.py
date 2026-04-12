@@ -1,0 +1,139 @@
+"""Core scanning logic extracted from quq-monitor.py for public web service."""
+import math, time, random
+from datetime import datetime, timezone, timedelta
+import requests as req
+
+utc8 = timezone(timedelta(hours=8))
+
+USDT = '0x55d398326f99059ff775485246999027b3197955'
+USDC = '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d'
+USD1 = '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d'
+QUQ  = '0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf'
+ROUTER = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'
+DEX_ADDYS = {
+    '0xb300000b72deaeb607a12d5f54773d1c19c7028d',
+    '0xe1acb466421ed24dd8bd381d1205bad0ad43ca9c',
+    '0xee50b711cfc25d4e700825d5632d8c6e2907f83d',
+    '0xf351e2befbe9c3744d890304d1af0e4987568d05',
+    '0xee57c25eaa31d453be7da41f70805e7b5e6ef83d',
+}
+
+
+def trading_window(day_text=None):
+    now = datetime.now(utc8)
+    if day_text:
+        d = datetime.strptime(day_text, '%Y-%m-%d').date()
+        start = datetime.combine(d, datetime.min.time().replace(hour=8)).replace(tzinfo=utc8)
+        end = start + timedelta(days=1)
+        return d, int(start.timestamp()), int(end.timestamp())
+    d = now.date() if now.hour >= 8 else (now.date() - timedelta(days=1))
+    start = datetime.combine(d, datetime.min.time().replace(hour=8)).replace(tzinfo=utc8)
+    return d, int(start.timestamp()), int(now.timestamp())
+
+
+def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=None):
+    results = []
+    keys_cycle = list(api_keys)
+    session = req.Session()
+    session.headers['User-Agent'] = 'Mozilla/5.0'
+    for page in range(1, 80):
+        got_page = False
+        max_retries = len(api_keys) * 2 + 5
+        for retry in range(max_retries):
+            api_key = keys_cycle[retry % len(keys_cycle)]
+            try:
+                contract_param = f'&contractaddress={contract}' if contract else ''
+                url = (f'https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx'
+                       f'{contract_param}&address={addr}&sort=desc&page={page}&offset=200&apikey={api_key}')
+                resp = session.get(url, timeout=25)
+                data = resp.json()
+                rows = data.get('result', []) or []
+                if isinstance(rows, str):
+                    time.sleep(2 + retry * 0.5)
+                    continue
+                if not rows:
+                    return results
+                past_window = False
+                for tx in rows:
+                    ts = int(tx.get('timeStamp', 0))
+                    if ts_start <= ts < ts_end:
+                        results.append(tx)
+                    if ts < ts_start:
+                        past_window = True
+                if past_window:
+                    return results
+                if len(rows) < 200:
+                    return results
+                got_page = True
+                time.sleep(0.15)
+                break
+            except Exception:
+                time.sleep(1.5 + retry * 0.5)
+        if not got_page:
+            break
+    return results
+
+
+def query_address(addr, ts_start, ts_end, api_keys, retries=3):
+    a_lower = addr.lower()
+    for attempt in range(retries):
+        try:
+            all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=USDT)
+            all_quq = _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=QUQ)
+
+            by_hash = {}
+            for tx in all_usdt:
+                h = tx['hash'].lower()
+                frm, to = tx['from'].lower(), tx['to'].lower()
+                val = float(tx['value']) / 1e18
+                by_hash.setdefault(h, {'usdt_in': 0, 'usdt_out': 0, 'quq_in': 0, 'quq_out': 0})
+                if to == a_lower:   by_hash[h]['usdt_in'] += val
+                if frm == a_lower:  by_hash[h]['usdt_out'] += val
+            for tx in all_quq:
+                h = tx['hash'].lower()
+                frm, to = tx['from'].lower(), tx['to'].lower()
+                val = float(tx['value']) / 1e18
+                by_hash.setdefault(h, {'usdt_in': 0, 'usdt_out': 0, 'quq_in': 0, 'quq_out': 0})
+                if to == a_lower:   by_hash[h]['quq_in'] += val
+                if frm == a_lower:  by_hash[h]['quq_out'] += val
+
+            buy, sell = 0.0, 0.0
+            quq_hashes = set()
+            for h, v in by_hash.items():
+                if v['quq_in'] > 0 or v['quq_out'] > 0:
+                    quq_hashes.add(h)
+                    buy += v['usdt_out']
+                    sell += v['usdt_in']
+
+            # Rebate detection
+            non_quq_by_cp = {}
+            for tx in all_usdt:
+                h = tx['hash'].lower()
+                if h in quq_hashes:
+                    continue
+                val = float(tx['value']) / 1e18
+                if val < 1000:
+                    continue
+                frm, to = tx['from'].lower(), tx['to'].lower()
+                cp = frm if to == a_lower else to
+                non_quq_by_cp.setdefault(cp, {'in': 0, 'out': 0})
+                if to == a_lower:
+                    non_quq_by_cp[cp]['in'] += val
+                else:
+                    non_quq_by_cp[cp]['out'] += val
+            for cp, v in non_quq_by_cp.items():
+                if v['in'] > 0 and v['out'] > 0 and abs(v['in'] - v['out']) < 100:
+                    sell += v['in'] - v['out']
+
+            return {
+                'addr': a_lower,
+                'fullAddr': addr,
+                'usdt_in': buy,
+                'usdt_out': sell,
+                'wear': sell - buy,
+                'points': int(math.floor(math.log2(buy / 2)) + 1) if buy >= 2 else 0,
+            }
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0}
