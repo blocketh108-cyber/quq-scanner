@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from scanner import trading_window, query_address
+from scanner import trading_window, query_address, query_balances
 
 app = FastAPI(title="QUQ Alpha Scanner")
 
@@ -28,9 +28,14 @@ task_semaphore = threading.Semaphore(MAX_CONCURRENT_TASKS)
 class ScanRequest(BaseModel):
     addresses: list[str]
     day: Optional[str] = None  # YYYY-MM-DD, default today
+    include_balances: bool = False  # Also fetch balances
 
 
-def _run_scan(task_id: str, addresses: list[str], day: Optional[str]):
+class RefreshRequest(BaseModel):
+    addresses: list[str]
+
+
+def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_balances: bool = False):
     acquired = task_semaphore.acquire(timeout=0)
     if not acquired:
         tasks[task_id]['status'] = 'error'
@@ -43,6 +48,12 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str]):
         results = []
         for i, addr in enumerate(addresses):
             r = query_address(addr, ts_start, ts_end, API_KEYS)
+            if include_balances:
+                bal = query_balances(addr)
+                r['usdt_bal'] = bal['usdt']
+                r['usdc_bal'] = bal['usdc']
+                r['usd1_bal'] = bal['usd1']
+                r['bnb_bal'] = bal['bnb']
             results.append(r)
             tasks[task_id]['progress'] = i + 1
             tasks[task_id]['results'] = results
@@ -85,7 +96,7 @@ def start_scan(req: ScanRequest):
         'created': time.time(),
         'day': req.day,
     }
-    t = threading.Thread(target=_run_scan, args=(task_id, addrs, req.day), daemon=True)
+    t = threading.Thread(target=_run_scan, args=(task_id, addrs, req.day, req.include_balances), daemon=True)
     t.start()
     return {"task_id": task_id, "total": len(addrs)}
 
@@ -117,6 +128,27 @@ def get_results(task_id: str):
         "results": task['results'],
         "error": task['error'],
     }
+
+
+@app.post("/api/refresh")
+def refresh_balances(req: RefreshRequest):
+    """One-shot balance refresh for up to 50 addresses (synchronous, fast)."""
+    addrs = []
+    for a in req.addresses:
+        a = a.strip()
+        if not a:
+            continue
+        if not re.fullmatch(r'0x[a-fA-F0-9]{40}', a):
+            raise HTTPException(400, f"无效地址: {a}")
+        addrs.append(a)
+    if not addrs:
+        raise HTTPException(400, "请提供至少一个地址")
+    if len(addrs) > MAX_ADDRESSES:
+        raise HTTPException(400, f"最多支持 {MAX_ADDRESSES} 个地址")
+    results = []
+    for addr in addrs:
+        results.append(query_balances(addr))
+    return {"results": results, "count": len(results)}
 
 
 # Serve static frontend

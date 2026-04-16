@@ -1,5 +1,5 @@
 """Core scanning logic extracted from quq-monitor.py for public web service."""
-import math, time, random
+import math, time, random, os
 from datetime import datetime, timezone, timedelta
 import requests as req
 
@@ -9,7 +9,10 @@ USDT = '0x55d398326f99059ff775485246999027b3197955'
 USDC = '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d'
 USD1 = '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d'
 QUQ  = '0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf'
+BNB_PLACEHOLDER = 'BNB'
 ROUTER = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'
+
+BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed1.binance.org')
 DEX_ADDYS = {
     '0xb300000b72deaeb607a12d5f54773d1c19c7028d',
     '0xe1acb466421ed24dd8bd381d1205bad0ad43ca9c',
@@ -137,3 +140,42 @@ def query_address(addr, ts_start, ts_end, api_keys, retries=3):
             pass
         time.sleep(0.5)
     return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0}
+
+
+# --- Balance queries via RPC ---
+
+def _rpc_call(method, params):
+    """Call BSC JSON-RPC."""
+    r = req.post(BSC_RPC, json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1}, timeout=15)
+    return r.json().get('result')
+
+
+def _erc20_balance(token_contract, wallet_addr):
+    """Get ERC20 balance via eth_call (balanceOf)."""
+    # balanceOf(address) selector = 0x70a08231
+    padded = wallet_addr.lower().replace('0x', '').zfill(64)
+    data = '0x70a08231' + padded
+    result = _rpc_call('eth_call', [{'to': token_contract, 'data': data}, 'latest'])
+    if result:
+        return int(result, 16) / 1e18
+    return 0.0
+
+
+def _bnb_balance(wallet_addr):
+    """Get native BNB balance."""
+    result = _rpc_call('eth_getBalance', [wallet_addr, 'latest'])
+    if result:
+        return int(result, 16) / 1e18
+    return 0.0
+
+
+def query_balances(addr):
+    """Query USDT, USDC, USD1 and BNB balances for a single address."""
+    return {
+        'addr': addr.lower(),
+        'fullAddr': addr,
+        'usdt': _erc20_balance(USDT, addr),
+        'usdc': _erc20_balance(USDC, addr),
+        'usd1': _erc20_balance(USD1, addr),
+        'bnb': _bnb_balance(addr),
+    }

@@ -1,6 +1,6 @@
 <!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>QUQ Alpha 扫描器</title><style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e0e0e0;padding:20px;max-width:1200px;margin:0 auto}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e0e0e0;padding:20px;max-width:1400px;margin:0 auto}
 h1{color:#fff;margin-bottom:8px;font-size:24px}
 .subtitle{color:#9ca3af;margin-bottom:20px;font-size:14px}
 .input-section{background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:24px;margin-bottom:24px}
@@ -11,8 +11,11 @@ textarea::placeholder{color:#555}
 .controls input[type=date]{padding:9px 12px;border-radius:10px;border:1px solid #374151;background:#111827;color:#fff;font-size:14px}
 .btn{padding:10px 20px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s}
 .btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
-.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-secondary{background:#059669;color:#fff}.btn-secondary:hover{background:#047857}
+.btn-primary:disabled,.btn-secondary:disabled{opacity:.5;cursor:not-allowed}
 .hint{color:#666;font-size:12px;margin-top:8px}
+.cb-label{color:#9ca3af;font-size:13px;display:flex;align-items:center;gap:5px;cursor:pointer}
+.cb-label input{accent-color:#2563eb}
 
 .progress-section{display:none;background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:20px;margin-bottom:24px}
 .progress-bar-outer{width:100%;height:24px;background:#252540;border-radius:12px;overflow:hidden;margin:10px 0}
@@ -23,18 +26,19 @@ textarea::placeholder{color:#555}
 .stat-card{background:#1a1a2e;border:1px solid #333;border-radius:10px;padding:15px 25px;min-width:140px}
 .stat-card .label{color:#888;font-size:13px;margin-bottom:5px}
 .stat-card .value{color:#fff;font-size:22px;font-weight:bold}
-.stat-card .value.green{color:#4ade80}.stat-card .value.red{color:#f87171}
+.stat-card .value.green{color:#4ade80}.stat-card .value.red{color:#f87171}.stat-card .value.blue{color:#60a5fa}
 
 .results-section{display:none}
 .toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .search-input,.sort-select{padding:9px 12px;border-radius:10px;border:1px solid #374151;background:#111827;color:#fff;font-size:14px}
 
 table{width:100%;border-collapse:collapse;background:#1a1a2e;border-radius:10px;overflow:hidden}
-th{background:#252540;color:#fff;padding:12px 15px;text-align:left;font-size:13px;border-bottom:1px solid #333}
-td{padding:10px 15px;font-size:14px;border-bottom:1px solid #222}
+th{background:#252540;color:#fff;padding:12px 10px;text-align:left;font-size:12px;border-bottom:1px solid #333;white-space:nowrap}
+td{padding:10px;font-size:13px;border-bottom:1px solid #222}
 tr:hover{background:#252540}
-.addr{color:#60a5fa;font-size:12px;word-break:break-all}
+.addr{color:#60a5fa;font-size:11px;word-break:break-all}
 .usdt{color:#4ade80}.wear{color:#facc15}
+.bal{color:#93c5fd;font-size:12px}
 .high{background:#16a34a;color:#fff;padding:2px 8px;border-radius:10px;font-size:12px}
 .zero{color:#555}
 .error-msg{color:#f87171;margin-top:12px;font-size:14px}
@@ -48,9 +52,11 @@ tr:hover{background:#252540}
   <div class="controls">
     <label style="color:#9ca3af;font-size:13px">扫描日期：</label>
     <input type="date" id="dayInput">
+    <label class="cb-label"><input type="checkbox" id="balCheck" checked> 同时查余额</label>
     <button class="btn btn-primary" id="scanBtn" onclick="startScan()">🔍 开始扫描</button>
+    <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 单次刷新余额</button>
   </div>
-  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8）</div>
+  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 单次刷新仅查余额不扫交易</div>
 </div>
 
 <div class="progress-section" id="progressSection">
@@ -67,6 +73,7 @@ tr:hover{background:#252540}
     <div class="stat-card"><div class="label">总买入</div><div class="value green" id="statBuy">-</div></div>
     <div class="stat-card"><div class="label">总卖出</div><div class="value" id="statSell">-</div></div>
     <div class="stat-card"><div class="label">总磨损</div><div class="value red" id="statWear">-</div></div>
+    <div class="stat-card" id="balCard" style="display:none"><div class="label">总余额 (U)</div><div class="value blue" id="statBal">-</div></div>
   </div>
   <div class="toolbar">
     <input id="searchInput" class="search-input" placeholder="搜索地址" oninput="renderTable()">
@@ -75,33 +82,39 @@ tr:hover{background:#252540}
       <option value="points_desc">积分从高到低</option>
       <option value="wear_desc">磨损绝对值从高到低</option>
       <option value="buy_desc">买入从高到低</option>
+      <option value="bal_desc">余额从高到低</option>
     </select>
   </div>
-  <table><thead><tr>
+  <table><thead><tr id="tableHead">
     <th>#</th><th>地址</th><th>买入</th><th>卖出</th><th>磨损</th><th>积分</th>
   </tr></thead><tbody id="tableBody"></tbody></table>
 </div>
 
 <script>
-// Set default date to today (UTC+8)
 const now = new Date(Date.now() + 8*3600000);
 const h = now.getUTCHours();
 const d = h >= 8 ? now : new Date(now - 86400000);
 dayInput.value = d.toISOString().slice(0,10);
 
-let allResults = [], taskId = null, pollTimer = null;
+let allResults = [], taskId = null, hasBal = false, balOnly = false;
 
 function money(v){return '$'+Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
 function signedMoney(v){const n=Number(v||0);return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+function fmtBal(v){return Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}
+
+function getAddresses(){
+  return addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean);
+}
 
 async function startScan(){
-  errorMsg.textContent='';
-  const lines = addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean);
+  errorMsg.textContent='';balOnly=false;
+  const lines = getAddresses();
   if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
   if(lines.length>50){errorMsg.textContent='最多支持 50 个地址';return}
-  scanBtn.disabled=true;
+  scanBtn.disabled=true;refreshBtn.disabled=true;
+  const inclBal = balCheck.checked;
   try{
-    const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addresses:lines,day:dayInput.value||null})});
+    const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addresses:lines,day:dayInput.value||null,include_balances:inclBal})});
     const data=await res.json();
     if(!res.ok)throw new Error(data.detail||'请求失败');
     taskId=data.task_id;
@@ -110,7 +123,29 @@ async function startScan(){
     progressBar.style.width='0%';
     progressText.textContent=`0 / ${data.total}`;
     pollStatus();
-  }catch(e){errorMsg.textContent=String(e);scanBtn.disabled=false}
+  }catch(e){errorMsg.textContent=String(e);scanBtn.disabled=false;refreshBtn.disabled=false}
+}
+
+async function refreshBalances(){
+  errorMsg.textContent='';balOnly=true;
+  const lines = getAddresses();
+  if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
+  if(lines.length>50){errorMsg.textContent='最多支持 50 个地址';return}
+  scanBtn.disabled=true;refreshBtn.disabled=true;
+  progressSection.style.display='block';
+  progressTitle.textContent='查询余额中...';
+  progressBar.style.width='50%';
+  progressText.textContent=`查询 ${lines.length} 个地址`;
+  try{
+    const res=await fetch('/api/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addresses:lines})});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.detail||'请求失败');
+    allResults=data.results;hasBal=true;
+    progressSection.style.display='none';
+    resultsSection.style.display='block';
+    updateStats();renderTable();
+  }catch(e){errorMsg.textContent=String(e);progressSection.style.display='none'}
+  scanBtn.disabled=false;refreshBtn.disabled=false;
 }
 
 async function pollStatus(){
@@ -123,10 +158,10 @@ async function pollStatus(){
     progressText.textContent=`${s.progress} / ${s.total}`;
     progressTitle.textContent=s.status==='running'?'扫描中...':s.status==='queued'?'排队中...':'完成';
     if(s.status==='done'){
-      await loadResults();scanBtn.disabled=false;return;
+      await loadResults();scanBtn.disabled=false;refreshBtn.disabled=false;return;
     }
     if(s.status==='error'){
-      errorMsg.textContent=s.error||'扫描失败';scanBtn.disabled=false;progressSection.style.display='none';return;
+      errorMsg.textContent=s.error||'扫描失败';scanBtn.disabled=false;refreshBtn.disabled=false;progressSection.style.display='none';return;
     }
   }catch(e){}
   setTimeout(pollStatus,2000);
@@ -136,29 +171,67 @@ async function loadResults(){
   const res=await fetch(`/api/results/${taskId}`);
   const data=await res.json();
   allResults=data.results||[];
+  hasBal=allResults.length>0 && allResults[0].usdt_bal!==undefined;
   progressSection.style.display='none';
   resultsSection.style.display='block';
   updateStats();renderTable();
 }
 
 function updateStats(){
-  let active=0,buy=0,sell=0,wear=0;
-  allResults.forEach(r=>{if(r.points>0)active++;buy+=r.usdt_in;sell+=r.usdt_out;wear+=r.wear});
-  statActive.textContent=active;statBuy.textContent=money(buy);statSell.textContent=money(sell);statWear.textContent=signedMoney(wear);
+  if(balOnly){
+    statActive.textContent=allResults.length;
+    statBuy.textContent='-';statSell.textContent='-';statWear.textContent='-';
+  }else{
+    let active=0,buy=0,sell=0,wear=0;
+    allResults.forEach(r=>{if(r.points>0)active++;buy+=r.usdt_in||0;sell+=r.usdt_out||0;wear+=r.wear||0});
+    statActive.textContent=active;statBuy.textContent=money(buy);statSell.textContent=money(sell);statWear.textContent=signedMoney(wear);
+  }
+  if(hasBal||balOnly){
+    let totalBal=0;
+    allResults.forEach(r=>{totalBal+=(r.usdt_bal||r.usdt||0)+(r.usdc_bal||r.usdc||0)+(r.usd1_bal||r.usd1||0)});
+    balCard.style.display='';statBal.textContent=money(totalBal);
+  }else{balCard.style.display='none'}
 }
 
 function renderTable(){
+  const showBal=hasBal||balOnly;
+  // Update header
+  if(balOnly){
+    tableHead.innerHTML='<th>#</th><th>地址</th><th>USDT</th><th>USDC</th><th>USD1</th><th>BNB</th><th>总余额</th>';
+  }else if(showBal){
+    tableHead.innerHTML='<th>#</th><th>地址</th><th>买入</th><th>卖出</th><th>磨损</th><th>积分</th><th>USDT</th><th>USDC</th><th>USD1</th><th>BNB</th>';
+  }else{
+    tableHead.innerHTML='<th>#</th><th>地址</th><th>买入</th><th>卖出</th><th>磨损</th><th>积分</th>';
+  }
+
   let rows=[...allResults];
   const q=(searchInput.value||'').toLowerCase();
   if(q)rows=rows.filter(r=>(r.fullAddr||r.addr||'').toLowerCase().includes(q));
   const sort=sortSelect.value;
-  if(sort==='points_desc')rows.sort((a,b)=>b.points-a.points);
-  else if(sort==='wear_desc')rows.sort((a,b)=>Math.abs(b.wear)-Math.abs(a.wear));
-  else if(sort==='buy_desc')rows.sort((a,b)=>b.usdt_in-a.usdt_in);
+  if(sort==='points_desc')rows.sort((a,b)=>(b.points||0)-(a.points||0));
+  else if(sort==='wear_desc')rows.sort((a,b)=>Math.abs(b.wear||0)-Math.abs(a.wear||0));
+  else if(sort==='buy_desc')rows.sort((a,b)=>(b.usdt_in||0)-(a.usdt_in||0));
+  else if(sort==='bal_desc')rows.sort((a,b)=>{
+    const ba=(b.usdt_bal||b.usdt||0)+(b.usdc_bal||b.usdc||0)+(b.usd1_bal||b.usd1||0);
+    const aa=(a.usdt_bal||a.usdt||0)+(a.usdc_bal||a.usdc||0)+(a.usd1_bal||a.usd1||0);
+    return ba-aa;
+  });
+
   const tbody=tableBody;tbody.innerHTML='';
   rows.forEach((r,i)=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td>`;
+    const usdt_b=r.usdt_bal!=null?r.usdt_bal:(r.usdt||0);
+    const usdc_b=r.usdc_bal!=null?r.usdc_bal:(r.usdc||0);
+    const usd1_b=r.usd1_bal!=null?r.usd1_bal:(r.usd1||0);
+    const bnb_b=r.bnb_bal!=null?r.bnb_bal:(r.bnb||0);
+    if(balOnly){
+      const total=usdt_b+usdc_b+usd1_b;
+      tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="bal">${fmtBal(usdt_b)}</td><td class="bal">${fmtBal(usdc_b)}</td><td class="bal">${fmtBal(usd1_b)}</td><td class="bal">${fmtBal(bnb_b)}</td><td class="usdt">${money(total)}</td>`;
+    }else if(showBal){
+      tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td><td class="bal">${fmtBal(usdt_b)}</td><td class="bal">${fmtBal(usdc_b)}</td><td class="bal">${fmtBal(usd1_b)}</td><td class="bal">${fmtBal(bnb_b)}</td>`;
+    }else{
+      tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td>`;
+    }
     tbody.appendChild(tr);
   });
 }
