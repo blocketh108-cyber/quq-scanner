@@ -13,6 +13,11 @@ textarea::placeholder{color:#555}
 .btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
 .btn-secondary{background:#059669;color:#fff}.btn-secondary:hover{background:#047857}
 .btn-primary:disabled,.btn-secondary:disabled{opacity:.5;cursor:not-allowed}
+.btn-mini{padding:4px 10px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:#334155;color:#93c5fd;transition:all .15s}
+.btn-mini:hover{background:#475569;color:#fff}
+.btn-mini:disabled{opacity:.4;cursor:not-allowed}
+.btn-mini.loading{animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hint{color:#666;font-size:12px;margin-top:8px}
 .cb-label{color:#9ca3af;font-size:13px;display:flex;align-items:center;gap:5px;cursor:pointer}
 .cb-label input{accent-color:#2563eb}
@@ -39,6 +44,8 @@ tr:hover{background:#252540}
 .addr{color:#60a5fa;font-size:11px;word-break:break-all}
 .usdt{color:#4ade80}.wear{color:#facc15}
 .bal{color:#93c5fd;font-size:12px}
+.bal.fresh{animation:flash .6s}
+@keyframes flash{0%{color:#4ade80}100%{color:#93c5fd}}
 .high{background:#16a34a;color:#fff;padding:2px 8px;border-radius:10px;font-size:12px}
 .zero{color:#555}
 .error-msg{color:#f87171;margin-top:12px;font-size:14px}
@@ -54,9 +61,9 @@ tr:hover{background:#252540}
     <input type="date" id="dayInput">
     <label class="cb-label"><input type="checkbox" id="balCheck" checked> 同时查余额</label>
     <button class="btn btn-primary" id="scanBtn" onclick="startScan()">🔍 开始扫描</button>
-    <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 单次刷新余额</button>
+    <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 全部刷新余额</button>
   </div>
-  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 单次刷新仅查余额不扫交易</div>
+  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 每行地址后有单独的🔄刷新按钮</div>
 </div>
 
 <div class="progress-section" id="progressSection">
@@ -93,8 +100,8 @@ tr:hover{background:#252540}
 <script>
 const now = new Date(Date.now() + 8*3600000);
 const h = now.getUTCHours();
-const d = h >= 8 ? now : new Date(now - 86400000);
-dayInput.value = d.toISOString().slice(0,10);
+const dd = h >= 8 ? now : new Date(now - 86400000);
+dayInput.value = dd.toISOString().slice(0,10);
 
 let allResults = [], taskId = null, hasBal = false, balOnly = false;
 
@@ -104,6 +111,31 @@ function fmtBal(v){return Number(v||0).toLocaleString(undefined,{minimumFraction
 
 function getAddresses(){
   return addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean);
+}
+
+// --- Single row refresh ---
+async function refreshRow(addr, idx){
+  const btn = document.getElementById('rb-'+idx);
+  if(!btn) return;
+  btn.disabled=true; btn.classList.add('loading'); btn.textContent='⏳';
+  try{
+    const res = await fetch('/api/balance/'+addr);
+    const bal = await res.json();
+    if(!res.ok) throw new Error(bal.detail||'失败');
+    // Update allResults
+    const r = allResults.find(r=>(r.fullAddr||r.addr||'').toLowerCase()===addr.toLowerCase());
+    if(r){
+      r.usdt_bal = bal.usdt; r.usdc_bal = bal.usdc;
+      r.usd1_bal = bal.usd1; r.bnb_bal = bal.bnb;
+    }
+    hasBal = true;
+    updateStats(); renderTable();
+  }catch(e){
+    btn.textContent='❌';
+    setTimeout(()=>{btn.textContent='🔄';btn.disabled=false;btn.classList.remove('loading')},2000);
+    return;
+  }
+  // After render, the button is recreated, no need to reset
 }
 
 async function startScan(){
@@ -195,16 +227,15 @@ function updateStats(){
 
 function renderTable(){
   const showBal=hasBal||balOnly;
-  // Update header
-  if(balOnly){
-    tableHead.innerHTML='<th>#</th><th>地址</th><th>USDT</th><th>USDC</th><th>USD1</th><th>BNB</th><th>总余额</th>';
-  }else if(showBal){
-    tableHead.innerHTML='<th>#</th><th>地址</th><th>买入</th><th>卖出</th><th>磨损</th><th>积分</th><th>USDT</th><th>USDC</th><th>USD1</th><th>BNB</th>';
-  }else{
-    tableHead.innerHTML='<th>#</th><th>地址</th><th>买入</th><th>卖出</th><th>磨损</th><th>积分</th>';
-  }
+  // Build header
+  let hdr='<th>#</th><th>地址</th>';
+  if(!balOnly) hdr+='<th>买入</th><th>卖出</th><th>磨损</th><th>积分</th>';
+  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>BNB</th>';
+  if(balOnly) hdr+='<th>总余额</th>';
+  hdr+='<th>操作</th>';
+  tableHead.innerHTML=hdr;
 
-  let rows=[...allResults];
+  let rows=allResults.map((r,i)=>({...r,_idx:i}));
   const q=(searchInput.value||'').toLowerCase();
   if(q)rows=rows.filter(r=>(r.fullAddr||r.addr||'').toLowerCase().includes(q));
   const sort=sortSelect.value;
@@ -220,18 +251,27 @@ function renderTable(){
   const tbody=tableBody;tbody.innerHTML='';
   rows.forEach((r,i)=>{
     const tr=document.createElement('tr');
+    const addr=r.fullAddr||r.addr;
     const usdt_b=r.usdt_bal!=null?r.usdt_bal:(r.usdt||0);
     const usdc_b=r.usdc_bal!=null?r.usdc_bal:(r.usdc||0);
     const usd1_b=r.usd1_bal!=null?r.usd1_bal:(r.usd1||0);
     const bnb_b=r.bnb_bal!=null?r.bnb_bal:(r.bnb||0);
+    const hasBals=r.usdt_bal!=null||r.usdt!=null;
+    const freshCls=hasBals?' fresh':'';
+
+    let html=`<td>${i+1}</td><td class="addr">${addr}</td>`;
+    if(!balOnly){
+      html+=`<td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td>`;
+    }
+    if(showBal){
+      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
+    }
     if(balOnly){
       const total=usdt_b+usdc_b+usd1_b;
-      tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="bal">${fmtBal(usdt_b)}</td><td class="bal">${fmtBal(usdc_b)}</td><td class="bal">${fmtBal(usd1_b)}</td><td class="bal">${fmtBal(bnb_b)}</td><td class="usdt">${money(total)}</td>`;
-    }else if(showBal){
-      tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td><td class="bal">${fmtBal(usdt_b)}</td><td class="bal">${fmtBal(usdc_b)}</td><td class="bal">${fmtBal(usd1_b)}</td><td class="bal">${fmtBal(bnb_b)}</td>`;
-    }else{
-      tr.innerHTML=`<td>${i+1}</td><td class="addr">${r.fullAddr||r.addr}</td><td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td>`;
+      html+=`<td class="usdt">${money(total)}</td>`;
     }
+    html+=`<td><button class="btn-mini" id="rb-${r._idx}" onclick="refreshRow('${addr}',${r._idx})">🔄</button></td>`;
+    tr.innerHTML=html;
     tbody.appendChild(tr);
   });
 }

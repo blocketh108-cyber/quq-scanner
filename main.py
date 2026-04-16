@@ -151,6 +151,15 @@ def refresh_balances(req: RefreshRequest):
     return {"results": results, "count": len(results)}
 
 
+@app.get("/api/balance/{address}")
+def get_balance(address: str):
+    """Single address balance query."""
+    address = address.strip()
+    if not re.fullmatch(r'0x[a-fA-F0-9]{40}', address):
+        raise HTTPException(400, "无效地址")
+    return query_balances(address)
+
+
 # Serve static frontend
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
