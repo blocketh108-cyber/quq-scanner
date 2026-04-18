@@ -121,12 +121,39 @@ def _fetch_normal_txs(addr, ts_start, ts_end, api_keys):
 
 
 def _get_bnb_price():
-    """Get BNB/USDT price from Binance API."""
+    """Get BNB/USDT price. Try multiple sources."""
+    # Try Binance first
+    for url in [
+        'https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT',
+        'https://api.binance.us/api/v3/ticker/price?symbol=BNBUSDT',
+    ]:
+        try:
+            r = req.get(url, timeout=5)
+            if r.status_code == 200:
+                return float(r.json()['price'])
+        except Exception:
+            pass
+    # Try CoinGecko
     try:
-        r = req.get('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', timeout=10)
-        return float(r.json()['price'])
+        r = req.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', timeout=5)
+        if r.status_code == 200:
+            return float(r.json()['binancecoin']['usd'])
     except Exception:
-        return 600.0  # fallback
+        pass
+    # Try PancakeSwap on-chain (WBNB/USDT pool)
+    try:
+        # getReserves() on PancakeSwap V2 WBNB/USDT pair
+        pair = '0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae'
+        data = '0x0902f1ac'  # getReserves()
+        result = _rpc_call('eth_call', [{'to': pair, 'data': data}, 'latest'])
+        if result and len(result) >= 130:
+            reserve0 = int(result[2:66], 16) / 1e18   # WBNB
+            reserve1 = int(result[66:130], 16) / 1e18  # USDT
+            if reserve0 > 0:
+                return reserve1 / reserve0
+    except Exception:
+        pass
+    return 600.0  # fallback
 
 
 def query_address(addr, ts_start, ts_end, api_keys, retries=3):
