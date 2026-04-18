@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from scanner import trading_window, query_address, query_balances
+from scanner import trading_window, query_address, query_balances, _get_bnb_price
 
 app = FastAPI(title="QUQ Alpha Scanner")
 
@@ -68,6 +68,11 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
 @app.get("/api/health")
 def health():
     return {"keys_loaded": len(API_KEYS), "max_addresses": MAX_ADDRESSES}
+
+
+@app.get("/api/bnb-price")
+def bnb_price():
+    return {"price": _get_bnb_price()}
 
 
 @app.post("/api/scan")

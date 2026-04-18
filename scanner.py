@@ -77,12 +77,65 @@ def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=None):
     return results
 
 
+def _fetch_normal_txs(addr, ts_start, ts_end, api_keys):
+    """Fetch normal (BNB) transactions for an address in the time window."""
+    results = []
+    keys_cycle = list(api_keys)
+    session = req.Session()
+    session.headers['User-Agent'] = 'Mozilla/5.0'
+    for page in range(1, 80):
+        got_page = False
+        max_retries = len(api_keys) * 2 + 5
+        for retry in range(max_retries):
+            api_key = keys_cycle[retry % len(keys_cycle)]
+            try:
+                url = (f'https://api.etherscan.io/v2/api?chainid=56&module=account&action=txlist'
+                       f'&address={addr}&sort=desc&page={page}&offset=200&apikey={api_key}')
+                resp = session.get(url, timeout=25)
+                data = resp.json()
+                rows = data.get('result', []) or []
+                if isinstance(rows, str):
+                    time.sleep(2 + retry * 0.5)
+                    continue
+                if not rows:
+                    return results
+                past_window = False
+                for tx in rows:
+                    ts = int(tx.get('timeStamp', 0))
+                    if ts_start <= ts < ts_end:
+                        results.append(tx)
+                    if ts < ts_start:
+                        past_window = True
+                if past_window:
+                    return results
+                if len(rows) < 200:
+                    return results
+                got_page = True
+                time.sleep(0.15)
+                break
+            except Exception:
+                time.sleep(1.5 + retry * 0.5)
+        if not got_page:
+            break
+    return results
+
+
+def _get_bnb_price():
+    """Get BNB/USDT price from Binance API."""
+    try:
+        r = req.get('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', timeout=10)
+        return float(r.json()['price'])
+    except Exception:
+        return 600.0  # fallback
+
+
 def query_address(addr, ts_start, ts_end, api_keys, retries=3):
     a_lower = addr.lower()
     for attempt in range(retries):
         try:
             all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=USDT)
             all_quq = _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=QUQ)
+            all_normal = _fetch_normal_txs(addr, ts_start, ts_end, api_keys)
 
             by_hash = {}
             for tx in all_usdt:
@@ -128,6 +181,18 @@ def query_address(addr, ts_start, ts_end, api_keys, retries=3):
                 if v['in'] > 0 and v['out'] > 0 and abs(v['in'] - v['out']) < 100:
                     sell += v['in'] - v['out']
 
+            # BNB gas consumption from normal transactions (sent by this address)
+            bnb_tx_count = 0
+            bnb_gas_used = 0.0
+            for tx in all_normal:
+                if tx.get('from', '').lower() == a_lower:
+                    bnb_tx_count += 1
+                    gas_used = int(tx.get('gasUsed', 0))
+                    gas_price = int(tx.get('gasPrice', 0))
+                    bnb_gas_used += (gas_used * gas_price) / 1e18
+            # Also count gas from token transfers (these are in txlist too but let's
+            # also count internal/token tx gas from the normal tx list which covers all)
+
             return {
                 'addr': a_lower,
                 'fullAddr': addr,
@@ -135,11 +200,13 @@ def query_address(addr, ts_start, ts_end, api_keys, retries=3):
                 'usdt_out': sell,
                 'wear': sell - buy,
                 'points': int(math.floor(math.log2(buy / 2)) + 1) if buy >= 2 else 0,
+                'bnb_tx_count': bnb_tx_count,
+                'bnb_gas_used': bnb_gas_used,
             }
         except Exception:
             pass
         time.sleep(0.5)
-    return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0}
+    return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0, 'bnb_tx_count': 0, 'bnb_gas_used': 0}
 
 
 # --- Balance queries via RPC ---
