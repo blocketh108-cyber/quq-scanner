@@ -12,11 +12,7 @@ from scanner import trading_window, query_address, query_balances, _get_bnb_pric
 app = FastAPI(title="QUQ Alpha Scanner")
 
 # --- Config ---
-API_KEYS = [k.strip() for k in os.environ.get("BSCSCAN_API_KEYS", "").split(",") if k.strip()]
-if not API_KEYS:
-    print("WARNING: BSCSCAN_API_KEYS not set. Scanning will fail.")
-else:
-    print(f"Loaded {len(API_KEYS)} API key(s)")
+# Ankr API - no API keys needed, URL configured in scanner.py
 MAX_ADDRESSES = 50
 MAX_CONCURRENT_TASKS = 3
 
@@ -47,7 +43,7 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
         tasks[task_id]['day'] = str(trading_day)
         results = []
         for i, addr in enumerate(addresses):
-            r = query_address(addr, ts_start, ts_end, API_KEYS)
+            r = query_address(addr, ts_start, ts_end)
             if include_balances:
                 bal = query_balances(addr)
                 r['usdt_bal'] = bal['usdt']
@@ -67,7 +63,7 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
 
 @app.get("/api/health")
 def health():
-    return {"keys_loaded": len(API_KEYS), "max_addresses": MAX_ADDRESSES}
+    return {"keys_loaded": 0, "api": "ankr", "max_addresses": MAX_ADDRESSES}
 
 
 @app.get("/api/bnb-price")

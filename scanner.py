@@ -1,4 +1,5 @@
-"""Core scanning logic extracted from quq-monitor.py for public web service."""
+"""Core scanning logic extracted from quq-monitor.py for public web service.
+Migrated from Etherscan V2 to Ankr Advanced API (2026-04-20)."""
 import math, time, random, os
 from datetime import datetime, timezone, timedelta
 import requests as req
@@ -12,6 +13,7 @@ QUQ  = '0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf'
 BNB_PLACEHOLDER = 'BNB'
 ROUTER = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'
 
+ANKR_URL = os.environ.get('ANKR_URL', 'https://rpc.ankr.com/multichain/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167')
 BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed1.binance.org')
 DEX_ADDYS = {
     '0xb300000b72deaeb607a12d5f54773d1c19c7028d',
@@ -34,89 +36,154 @@ def trading_window(day_text=None):
     return d, int(start.timestamp()), int(now.timestamp())
 
 
-def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=None):
+def _ankr_post(method, params, retries=3):
+    """Call Ankr Advanced API with retries."""
+    for attempt in range(retries):
+        try:
+            resp = req.post(ANKR_URL, json={
+                "jsonrpc": "2.0", "method": method, "params": params, "id": 1
+            }, timeout=30)
+            data = resp.json()
+            if 'error' in data:
+                time.sleep(1 + attempt)
+                continue
+            return data.get('result', {})
+        except Exception:
+            time.sleep(1 + attempt)
+    return {}
+
+
+def _ankr_tx_to_etherscan(tx):
+    """Convert Ankr token transfer format to Etherscan-compatible dict."""
+    # Ankr returns timestamp as ISO string or unix int depending on method
+    ts_raw = tx.get('timestamp', 0)
+    if isinstance(ts_raw, str):
+        try:
+            ts_val = int(datetime.fromisoformat(ts_raw.replace('Z', '+00:00')).timestamp())
+        except Exception:
+            ts_val = int(ts_raw) if ts_raw.isdigit() else 0
+    else:
+        ts_val = int(ts_raw)
+
+    decimals = int(tx.get('tokenDecimals', 18))
+    raw_int = tx.get('valueRawInteger', '0')
+    try:
+        value_raw = int(raw_int)
+    except (ValueError, TypeError):
+        value_raw = 0
+
+    return {
+        'hash': tx.get('transactionHash', ''),
+        'from': tx.get('fromAddress', '').lower(),
+        'to': tx.get('toAddress', '').lower(),
+        'value': str(value_raw),
+        'contractAddress': tx.get('contractAddress', '').lower(),
+        'tokenDecimal': str(decimals),
+        'timeStamp': str(ts_val),
+    }
+
+
+def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
+    """Fetch token transfers via Ankr API with cursor pagination."""
     results = []
-    keys_cycle = list(api_keys)
-    session = req.Session()
-    session.headers['User-Agent'] = 'Mozilla/5.0'
-    for page in range(1, 80):
-        got_page = False
-        max_retries = len(api_keys) * 2 + 5
-        for retry in range(max_retries):
-            api_key = keys_cycle[retry % len(keys_cycle)]
-            try:
-                contract_param = f'&contractaddress={contract}' if contract else ''
-                url = (f'https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx'
-                       f'{contract_param}&address={addr}&sort=desc&page={page}&offset=200&apikey={api_key}')
-                resp = session.get(url, timeout=25)
-                data = resp.json()
-                rows = data.get('result', []) or []
-                if isinstance(rows, str):
-                    time.sleep(2 + retry * 0.5)
-                    continue
-                if not rows:
-                    return results
-                past_window = False
-                for tx in rows:
-                    ts = int(tx.get('timeStamp', 0))
-                    if ts_start <= ts < ts_end:
-                        results.append(tx)
-                    if ts < ts_start:
-                        past_window = True
-                if past_window:
-                    return results
-                if len(rows) < 200:
-                    return results
-                got_page = True
-                time.sleep(0.15)
-                break
-            except Exception:
-                time.sleep(1.5 + retry * 0.5)
-        if not got_page:
+    page_token = None
+    for _ in range(200):  # safety limit
+        params = {
+            "blockchain": ["bsc"],
+            "address": [addr],
+            "fromTimestamp": ts_start,
+            "toTimestamp": ts_end,
+            "pageSize": 10000,
+            "descOrder": True,
+        }
+        if contract:
+            params["contractAddress"] = contract
+        if page_token:
+            params["pageToken"] = page_token
+
+        result = _ankr_post("ankr_getTokenTransfers", params)
+        transfers = result.get('transfers', []) or []
+        if not transfers:
             break
+
+        for tx in transfers:
+            # Filter by contract if specified (Ankr may return all tokens)
+            if contract and tx.get('contractAddress', '').lower() != contract.lower():
+                continue
+            eth_tx = _ankr_tx_to_etherscan(tx)
+            ts = int(eth_tx['timeStamp'])
+            if ts_start <= ts < ts_end:
+                results.append(eth_tx)
+
+        page_token = result.get('nextPageToken')
+        if not page_token:
+            break
+        time.sleep(0.1)
+
     return results
 
 
-def _fetch_normal_txs(addr, ts_start, ts_end, api_keys):
-    """Fetch normal (BNB) transactions for an address in the time window."""
+def _fetch_normal_txs(addr, ts_start, ts_end, api_keys=None):
+    """Fetch normal (BNB) transactions via Ankr API."""
     results = []
-    keys_cycle = list(api_keys)
-    session = req.Session()
-    session.headers['User-Agent'] = 'Mozilla/5.0'
-    for page in range(1, 80):
-        got_page = False
-        max_retries = len(api_keys) * 2 + 5
-        for retry in range(max_retries):
-            api_key = keys_cycle[retry % len(keys_cycle)]
-            try:
-                url = (f'https://api.etherscan.io/v2/api?chainid=56&module=account&action=txlist'
-                       f'&address={addr}&sort=desc&page={page}&offset=200&apikey={api_key}')
-                resp = session.get(url, timeout=25)
-                data = resp.json()
-                rows = data.get('result', []) or []
-                if isinstance(rows, str):
-                    time.sleep(2 + retry * 0.5)
-                    continue
-                if not rows:
-                    return results
-                past_window = False
-                for tx in rows:
-                    ts = int(tx.get('timeStamp', 0))
-                    if ts_start <= ts < ts_end:
-                        results.append(tx)
-                    if ts < ts_start:
-                        past_window = True
-                if past_window:
-                    return results
-                if len(rows) < 200:
-                    return results
-                got_page = True
-                time.sleep(0.15)
-                break
-            except Exception:
-                time.sleep(1.5 + retry * 0.5)
-        if not got_page:
+    page_token = None
+    for _ in range(200):
+        params = {
+            "blockchain": "bsc",
+            "address": [addr],
+            "fromTimestamp": ts_start,
+            "toTimestamp": ts_end,
+            "pageSize": 10000,
+            "descOrder": True,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+
+        result = _ankr_post("ankr_getTransactionsByAddress", params)
+        txs = result.get('transactions', []) or []
+        if not txs:
             break
+
+        for tx in txs:
+            ts_raw = tx.get('timestamp', '0')
+            if isinstance(ts_raw, str) and ts_raw.startswith('0x'):
+                ts_val = int(ts_raw, 16)
+            elif isinstance(ts_raw, str):
+                try:
+                    ts_val = int(ts_raw)
+                except ValueError:
+                    ts_val = 0
+            else:
+                ts_val = int(ts_raw)
+
+            gas_used = tx.get('gasUsed', '0')
+            gas_price = tx.get('gasPrice', '0')
+            value = tx.get('value', '0')
+            # Ankr may return hex strings
+            if isinstance(gas_used, str) and gas_used.startswith('0x'):
+                gas_used = str(int(gas_used, 16))
+            if isinstance(gas_price, str) and gas_price.startswith('0x'):
+                gas_price = str(int(gas_price, 16))
+            if isinstance(value, str) and value.startswith('0x'):
+                value = str(int(value, 16))
+
+            eth_tx = {
+                'hash': tx.get('hash', ''),
+                'from': tx.get('from', '').lower(),
+                'to': (tx.get('to') or '').lower(),
+                'value': value,
+                'gasUsed': gas_used,
+                'gasPrice': gas_price,
+                'timeStamp': str(ts_val),
+            }
+            if ts_start <= ts_val < ts_end:
+                results.append(eth_tx)
+
+        page_token = result.get('nextPageToken')
+        if not page_token:
+            break
+        time.sleep(0.1)
+
     return results
 
 
@@ -156,13 +223,13 @@ def _get_bnb_price():
     return 600.0  # fallback
 
 
-def query_address(addr, ts_start, ts_end, api_keys, retries=3):
+def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
     a_lower = addr.lower()
     for attempt in range(retries):
         try:
-            all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=USDT)
-            all_quq = _fetch_all_token_txs(addr, ts_start, ts_end, api_keys, contract=QUQ)
-            all_normal = _fetch_normal_txs(addr, ts_start, ts_end, api_keys)
+            all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, contract=USDT)
+            all_quq = _fetch_all_token_txs(addr, ts_start, ts_end, contract=QUQ)
+            all_normal = _fetch_normal_txs(addr, ts_start, ts_end)
 
             by_hash = {}
             for tx in all_usdt:

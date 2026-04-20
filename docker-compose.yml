@@ -5,5 +5,5 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - BSCSCAN_API_KEYS=${BSCSCAN_API_KEYS}
+      - ANKR_URL=${ANKR_URL:-https://rpc.ankr.com/multichain/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167}
     restart: unless-stopped
