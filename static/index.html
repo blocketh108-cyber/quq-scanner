@@ -54,7 +54,7 @@ tr:hover{background:#252540}
 <div class="subtitle">粘贴 BSC 地址，扫描当天 QUQ 交易磨损数据</div>
 
 <div class="input-section">
-  <label>地址列表（每行一个，最多 50 个）</label>
+  <label>地址列表（每行一个，最多 1000 个）</label>
   <textarea id="addrInput" placeholder="0x1234...&#10;0x5678...&#10;每行一个 BSC 地址"></textarea>
   <div class="controls">
     <label style="color:#9ca3af;font-size:13px">扫描日期：</label>
@@ -149,7 +149,7 @@ async function startScan(){
   errorMsg.textContent='';balOnly=false;
   const lines = getAddresses();
   if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
-  if(lines.length>50){errorMsg.textContent='最多支持 50 个地址';return}
+  if(lines.length>1000){errorMsg.textContent='最多支持 1000 个地址';return}
   scanBtn.disabled=true;refreshBtn.disabled=true;
   const inclBal = balCheck.checked;
   try{
@@ -169,7 +169,7 @@ async function refreshBalances(){
   errorMsg.textContent='';balOnly=true;
   const lines = getAddresses();
   if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
-  if(lines.length>50){errorMsg.textContent='最多支持 50 个地址';return}
+  if(lines.length>1000){errorMsg.textContent='最多支持 1000 个地址';return}
   scanBtn.disabled=true;refreshBtn.disabled=true;
   progressSection.style.display='block';
   progressTitle.textContent='查询余额中...';

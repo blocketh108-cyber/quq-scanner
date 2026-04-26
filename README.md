@@ -28,6 +28,6 @@ BSCSCAN_API_KEYS="key1,key2" uvicorn main:app --host 0.0.0.0 --port 8000
 
 ## 限制
 
-- 单次最多 50 个地址
+- 单次最多 1000 个地址
 - 全局最多 3 个并发扫描任务
 - 结果保留 1 小时后自动清理

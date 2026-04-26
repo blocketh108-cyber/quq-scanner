@@ -13,7 +13,7 @@ app = FastAPI(title="QUQ Alpha Scanner")
 
 # --- Config ---
 # Ankr API - no API keys needed, URL configured in scanner.py
-MAX_ADDRESSES = 50
+MAX_ADDRESSES = 1000
 MAX_CONCURRENT_TASKS = 3
 
 # --- Task store ---
@@ -133,7 +133,7 @@ def get_results(task_id: str):
 
 @app.post("/api/refresh")
 def refresh_balances(req: RefreshRequest):
-    """One-shot balance refresh for up to 50 addresses (synchronous, fast)."""
+    """One-shot balance refresh for up to MAX_ADDRESSES addresses (synchronous, fast)."""
     addrs = []
     for a in req.addresses:
         a = a.strip()
