@@ -12,7 +12,8 @@ textarea::placeholder{color:#555}
 .btn{padding:10px 20px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s}
 .btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
 .btn-secondary{background:#059669;color:#fff}.btn-secondary:hover{background:#047857}
-.btn-primary:disabled,.btn-secondary:disabled{opacity:.5;cursor:not-allowed}
+.btn-quq{background:#dc2626;color:#fff}.btn-quq:hover{background:#b91c1c}
+.btn-primary:disabled,.btn-secondary:disabled,.btn-quq:disabled{opacity:.5;cursor:not-allowed}
 .btn-mini{padding:4px 10px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:#334155;color:#93c5fd;transition:all .15s}
 .btn-mini:hover{background:#475569;color:#fff}
 .btn-mini:disabled{opacity:.4;cursor:not-allowed}
@@ -60,10 +61,11 @@ tr:hover{background:#252540}
     <label style="color:#9ca3af;font-size:13px">扫描日期：</label>
     <input type="date" id="dayInput">
     <label class="cb-label"><input type="checkbox" id="balCheck" checked> 同时查余额</label>
-    <button class="btn btn-primary" id="scanBtn" onclick="startScan()">🔍 开始扫描</button>
+    <button class="btn btn-primary" id="scanBtnU" onclick="startScan('u')">🔍 U 算法扫描</button>
+    <button class="btn btn-quq" id="scanBtnQuq" onclick="startScan('quq')">🦞 QUQ 算法扫描</button>
     <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 全部刷新余额</button>
   </div>
-  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 每行地址后有单独的🔄刷新按钮</div>
+  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · <b>U 算法</b>=USDT 返现旧逻辑（含非QUQ rebate）· <b>QUQ 算法</b>=v6 真实磨损（仅 swap，扣本金注入，剥离首笔卖空领）· 每行地址有单独🔄刷新按钮</div>
 </div>
 
 <div class="progress-section" id="progressSection">
@@ -145,24 +147,31 @@ async function refreshRow(addr, idx){
   // After render, the button is recreated, no need to reset
 }
 
-async function startScan(){
+function setScanBtnDisabled(d){
+  const a=document.getElementById('scanBtnU'),b=document.getElementById('scanBtnQuq');
+  if(a)a.disabled=d;if(b)b.disabled=d;refreshBtn.disabled=d;
+}
+let currentAlgo='u';
+async function startScan(algo){
+  algo=algo||'u';currentAlgo=algo;
   errorMsg.textContent='';balOnly=false;
   const lines = getAddresses();
   if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
   if(lines.length>1000){errorMsg.textContent='最多支持 1000 个地址';return}
-  scanBtn.disabled=true;refreshBtn.disabled=true;
+  setScanBtnDisabled(true);
   const inclBal = balCheck.checked;
   try{
-    const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addresses:lines,day:dayInput.value||null,include_balances:inclBal})});
+    const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addresses:lines,day:dayInput.value||null,include_balances:inclBal,algo:algo})});
     const data=await res.json();
     if(!res.ok)throw new Error(data.detail||'请求失败');
     taskId=data.task_id;
     progressSection.style.display='block';
     resultsSection.style.display='none';
     progressBar.style.width='0%';
+    progressTitle.textContent=(algo==='quq'?'QUQ 算法 ':'U 算法 ')+'扫描中...';
     progressText.textContent=`0 / ${data.total}`;
     pollStatus();
-  }catch(e){errorMsg.textContent=String(e);scanBtn.disabled=false;refreshBtn.disabled=false}
+  }catch(e){errorMsg.textContent=String(e);setScanBtnDisabled(false)}
 }
 
 async function refreshBalances(){
@@ -170,7 +179,7 @@ async function refreshBalances(){
   const lines = getAddresses();
   if(!lines.length){errorMsg.textContent='请输入至少一个地址';return}
   if(lines.length>1000){errorMsg.textContent='最多支持 1000 个地址';return}
-  scanBtn.disabled=true;refreshBtn.disabled=true;
+  setScanBtnDisabled(true);
   progressSection.style.display='block';
   progressTitle.textContent='查询余额中...';
   progressBar.style.width='50%';
@@ -184,7 +193,7 @@ async function refreshBalances(){
     resultsSection.style.display='block';
     updateStats();renderTable();
   }catch(e){errorMsg.textContent=String(e);progressSection.style.display='none'}
-  scanBtn.disabled=false;refreshBtn.disabled=false;
+  setScanBtnDisabled(false);
 }
 
 async function pollStatus(){
@@ -197,10 +206,10 @@ async function pollStatus(){
     progressText.textContent=`${s.progress} / ${s.total}`;
     progressTitle.textContent=s.status==='running'?'扫描中...':s.status==='queued'?'排队中...':'完成';
     if(s.status==='done'){
-      await loadResults();scanBtn.disabled=false;refreshBtn.disabled=false;return;
+      await loadResults();setScanBtnDisabled(false);return;
     }
     if(s.status==='error'){
-      errorMsg.textContent=s.error||'扫描失败';scanBtn.disabled=false;refreshBtn.disabled=false;progressSection.style.display='none';return;
+      errorMsg.textContent=s.error||'扫描失败';setScanBtnDisabled(false);progressSection.style.display='none';return;
     }
   }catch(e){}
   setTimeout(pollStatus,2000);

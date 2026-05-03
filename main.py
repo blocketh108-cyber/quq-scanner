@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from scanner import trading_window, query_address, query_balances, _get_bnb_price
+from scanner import trading_window, query_address, query_address_quq_v6, query_balances, _get_bnb_price, get_quq_price
 
 app = FastAPI(title="QUQ Alpha Scanner")
 
@@ -25,13 +25,14 @@ class ScanRequest(BaseModel):
     addresses: list[str]
     day: Optional[str] = None  # YYYY-MM-DD, default today
     include_balances: bool = False  # Also fetch balances
+    algo: Optional[str] = "u"  # "u" = USDT 返现算法（旧）, "quq" = QUQ v6 算法
 
 
 class RefreshRequest(BaseModel):
     addresses: list[str]
 
 
-def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_balances: bool = False):
+def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_balances: bool = False, algo: str = "u"):
     acquired = task_semaphore.acquire(timeout=0)
     if not acquired:
         tasks[task_id]['status'] = 'error'
@@ -41,9 +42,11 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
         tasks[task_id]['status'] = 'running'
         trading_day, ts_start, ts_end = trading_window(day)
         tasks[task_id]['day'] = str(trading_day)
+        tasks[task_id]['algo'] = algo
+        scan_fn = query_address_quq_v6 if algo == 'quq' else query_address
         results = []
         for i, addr in enumerate(addresses):
-            r = query_address(addr, ts_start, ts_end)
+            r = scan_fn(addr, ts_start, ts_end)
             if include_balances:
                 bal = query_balances(addr)
                 r['usdt_bal'] = bal['usdt']
@@ -87,6 +90,9 @@ def start_scan(req: ScanRequest):
     if len(addrs) > MAX_ADDRESSES:
         raise HTTPException(400, f"最多支持 {MAX_ADDRESSES} 个地址")
 
+    algo = (req.algo or 'u').lower()
+    if algo not in ('u', 'quq'):
+        raise HTTPException(400, "algo 必须为 'u' 或 'quq'")
     task_id = uuid.uuid4().hex[:12]
     tasks[task_id] = {
         'status': 'queued',
@@ -96,10 +102,11 @@ def start_scan(req: ScanRequest):
         'error': None,
         'created': time.time(),
         'day': req.day,
+        'algo': algo,
     }
-    t = threading.Thread(target=_run_scan, args=(task_id, addrs, req.day, req.include_balances), daemon=True)
+    t = threading.Thread(target=_run_scan, args=(task_id, addrs, req.day, req.include_balances, algo), daemon=True)
     t.start()
-    return {"task_id": task_id, "total": len(addrs)}
+    return {"task_id": task_id, "total": len(addrs), "algo": algo}
 
 
 @app.get("/api/status/{task_id}")
@@ -126,9 +133,15 @@ def get_results(task_id: str):
         "progress": task['progress'],
         "total": task['total'],
         "day": task.get('day'),
+        "algo": task.get('algo', 'u'),
         "results": task['results'],
         "error": task['error'],
     }
+
+
+@app.get("/api/quq-price")
+def quq_price():
+    return {"price": get_quq_price()}
 
 
 @app.post("/api/refresh")

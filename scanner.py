@@ -23,6 +23,38 @@ DEX_ADDYS = {
     '0xee57c25eaa31d453be7da41f70805e7b5e6ef83d',
 }
 
+# QUQ v6 算法常量
+PRINCIPAL_SRC = '0x4201e0e98fa3b33483fcd009149b390302760d67'  # 团队本金注入源
+TEAM_RELAY    = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'  # 团队中转
+PRINCIPAL_MIN_USD   = 500
+PRINCIPAL_MAX_QUQ   = 5_000_000
+RELAY_SKIP_QUQ      = 400_000
+
+_QUQ_PRICE_CACHE = {'price': None, 'ts': 0}
+
+def get_quq_price():
+    """从 DexScreener 拉 QUQ/USDT 现价。缓存 60s。失败回退 0.002。"""
+    now = time.time()
+    if _QUQ_PRICE_CACHE['price'] and now - _QUQ_PRICE_CACHE['ts'] < 60:
+        return _QUQ_PRICE_CACHE['price']
+    try:
+        r = req.get(
+            f'https://api.dexscreener.com/latest/dex/tokens/{QUQ}',
+            timeout=8,
+        )
+        if r.status_code == 200:
+            pairs = (r.json().get('pairs') or [])
+            pairs = [p for p in pairs if p.get('chainId') == 'bsc']
+            pairs.sort(key=lambda p: -(p.get('liquidity', {}).get('usd') or 0))
+            if pairs:
+                price = float(pairs[0]['priceUsd'])
+                _QUQ_PRICE_CACHE['price'] = price
+                _QUQ_PRICE_CACHE['ts'] = now
+                return price
+    except Exception:
+        pass
+    return _QUQ_PRICE_CACHE['price'] or 0.002
+
 
 def trading_window(day_text=None):
     now = datetime.now(utc8)
@@ -301,6 +333,132 @@ def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
             pass
         time.sleep(0.5)
     return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0, 'bnb_tx_count': 0, 'bnb_gas_used': 0}
+
+
+# --- Balance queries via RPC ---
+
+def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
+    """QUQ v6 算法（按地址按日窗口的精简版）：
+    1) wear_v4 = 同 hash 同时含 USDT+QUQ 的 swap 内 (sell_usdt - buy_usdt)
+    2) 本金扣除：从 PRINCIPAL_SRC 单笔接收 QUQ，且 qty<5M 且 qty*vwap>$500，
+       但若当窗口内有 ≥400k QUQ 转出到 TEAM_RELAY，则跳过本金扣除（钱内部调度）
+    3) 首笔 QUQ 卖出收益剥离：若 wear_v6 > 0 且首笔 swap 卖 QUQ 当日 swap_ui > 0，
+       剥离 min(wear_v6, first_swap_sell_ui)；不会让地址从亏变盈
+    """
+    a_lower = addr.lower()
+    quq_price = get_quq_price()  # 本窗口 VWAP 近似用现价
+    for attempt in range(retries):
+        try:
+            all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, contract=USDT)
+            all_quq  = _fetch_all_token_txs(addr, ts_start, ts_end, contract=QUQ)
+            all_normal = _fetch_normal_txs(addr, ts_start, ts_end)
+
+            # 分组到 hash
+            by_hash = {}
+            for tx in all_usdt + all_quq:
+                h = tx['hash'].lower()
+                by_hash.setdefault(h, []).append(tx)
+
+            # 顺序按 timestamp（同 hash 第一笔）排序，便于"首笔 swap 卖出"识别
+            ordered_hashes = sorted(by_hash.keys(), key=lambda h: int(by_hash[h][0]['timeStamp']))
+
+            swap_ui = swap_uo = 0.0          # swap 内的 USDT 收/付
+            relay_qout = 0.0                 # 转给 TEAM_RELAY 的 QUQ
+            principal_usd = 0.0              # 本金注入折U
+            principal_n = 0
+            first_sell_swap_ui = 0.0         # 首笔卖 QUQ 的 swap 内 ui
+
+            for h in ordered_hashes:
+                items = by_hash[h]
+                ui = uo = qi = qo = 0.0
+                src_quq = None
+                relay_q_in_hash = 0.0
+                for tx in items:
+                    val = float(tx['value']) / 1e18
+                    ca = tx['contractAddress'].lower()
+                    fa = tx['from'].lower()
+                    ta = tx['to'].lower()
+                    if ta == a_lower:
+                        if ca == USDT:
+                            ui += val
+                        elif ca == QUQ:
+                            qi += val
+                            src_quq = fa
+                    elif fa == a_lower:
+                        if ca == USDT:
+                            uo += val
+                        elif ca == QUQ:
+                            qo += val
+                            if ta == TEAM_RELAY:
+                                relay_q_in_hash += val
+
+                is_swap = (ui > 0 or uo > 0) and (qi > 0 or qo > 0)
+                if is_swap:
+                    swap_ui += ui
+                    swap_uo += uo
+                    if qo > 0 and ui > 0 and first_sell_swap_ui == 0.0:
+                        first_sell_swap_ui = ui
+                else:
+                    relay_qout += relay_q_in_hash
+                    # 本金注入识别
+                    if qi > 0 and src_quq == PRINCIPAL_SRC:
+                        usd = qi * quq_price
+                        if usd > PRINCIPAL_MIN_USD and qi < PRINCIPAL_MAX_QUQ:
+                            principal_usd += usd
+                            principal_n += 1
+
+            wear_v4 = swap_ui - swap_uo
+            skip_principal = (relay_qout >= RELAY_SKIP_QUQ and principal_n > 0)
+            principal_kept = 0.0 if skip_principal else principal_usd
+            wear_v6 = wear_v4 - principal_kept
+
+            # 首笔 QUQ 卖出剥离（仅修正空领-空卖伪盈利）
+            quq_sell_stripped = 0.0
+            if wear_v6 > 0 and first_sell_swap_ui > 0:
+                quq_sell_stripped = min(wear_v6, first_sell_swap_ui)
+                wear_v6 -= quq_sell_stripped
+
+            # 积分仍按买入计（与 U 算法保持一致口径）
+            buy = swap_ui
+
+            # BNB gas
+            bnb_tx_count = 0
+            bnb_gas_used = 0.0
+            for tx in all_normal:
+                if tx.get('from', '').lower() == a_lower:
+                    bnb_tx_count += 1
+                    gas_used = int(tx.get('gasUsed', 0))
+                    gas_price = int(tx.get('gasPrice', 0))
+                    bnb_gas_used += (gas_used * gas_price) / 1e18
+
+            return {
+                'addr': a_lower,
+                'fullAddr': addr,
+                'algo': 'quq_v6',
+                'usdt_in': swap_ui,
+                'usdt_out': swap_uo,
+                'wear_v4': wear_v4,
+                'principal_kept': principal_kept,
+                'principal_n': principal_n,
+                'principal_skipped': skip_principal,
+                'relay_qout': relay_qout,
+                'quq_sell_stripped': quq_sell_stripped,
+                'wear': wear_v6,
+                'points': int(math.floor(math.log2(buy / 2)) + 1) if buy >= 2 else 0,
+                'bnb_tx_count': bnb_tx_count,
+                'bnb_gas_used': bnb_gas_used,
+                'quq_price': quq_price,
+            }
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return {
+        'addr': a_lower, 'fullAddr': addr, 'algo': 'quq_v6',
+        'usdt_in': 0, 'usdt_out': 0, 'wear_v4': 0, 'principal_kept': 0,
+        'principal_n': 0, 'principal_skipped': False, 'relay_qout': 0,
+        'quq_sell_stripped': 0, 'wear': 0, 'points': 0,
+        'bnb_tx_count': 0, 'bnb_gas_used': 0, 'quq_price': quq_price,
+    }
 
 
 # --- Balance queries via RPC ---
