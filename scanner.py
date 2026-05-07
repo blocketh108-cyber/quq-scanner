@@ -489,12 +489,13 @@ def _bnb_balance(wallet_addr):
 
 
 def query_balances(addr):
-    """Query USDT, USDC, USD1 and BNB balances for a single address."""
+    """Query USDT, USDC, USD1, QUQ and BNB balances for a single address."""
     return {
         'addr': addr.lower(),
         'fullAddr': addr,
         'usdt': _erc20_balance(USDT, addr),
         'usdc': _erc20_balance(USDC, addr),
         'usd1': _erc20_balance(USD1, addr),
+        'quq': _erc20_balance(QUQ, addr),
         'bnb': _bnb_balance(addr),
     }

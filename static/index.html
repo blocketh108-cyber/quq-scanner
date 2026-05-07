@@ -253,7 +253,7 @@ function renderTable(){
   // Build header
   let hdr='<th>#</th><th>地址</th>';
   if(!balOnly) hdr+='<th>买入</th><th>卖出</th><th>磨损</th><th>BNB笔数</th><th>Gas(BNB)</th><th>Gas(U)</th><th>总磨损</th><th>积分</th>';
-  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>BNB</th>';
+  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>QUQ</th><th>BNB</th>';
   if(balOnly) hdr+='<th>总余额</th>';
   hdr+='<th>操作</th>';
   tableHead.innerHTML=hdr;
@@ -278,6 +278,7 @@ function renderTable(){
     const usdt_b=r.usdt_bal!=null?r.usdt_bal:(r.usdt||0);
     const usdc_b=r.usdc_bal!=null?r.usdc_bal:(r.usdc||0);
     const usd1_b=r.usd1_bal!=null?r.usd1_bal:(r.usd1||0);
+    const quq_b=r.quq_bal!=null?r.quq_bal:(r.quq||0);
     const bnb_b=r.bnb_bal!=null?r.bnb_bal:(r.bnb||0);
     const hasBals=r.usdt_bal!=null||r.usdt!=null;
     const freshCls=hasBals?' fresh':'';
@@ -289,7 +290,7 @@ function renderTable(){
       html+=`<td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td>${r.bnb_tx_count||0}</td><td style="color:#f0b90b">${(r.bnb_gas_used||0).toFixed(6)}</td><td class="wear">${signedMoney(-gasUsdt)}</td><td class="wear" style="font-weight:bold">${signedMoney(totalWear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td>`;
     }
     if(showBal){
-      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
+      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(quq_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
     }
     if(balOnly){
       const total=usdt_b+usdc_b+usd1_b;

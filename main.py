@@ -52,6 +52,7 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
                 r['usdt_bal'] = bal['usdt']
                 r['usdc_bal'] = bal['usdc']
                 r['usd1_bal'] = bal['usd1']
+                r['quq_bal'] = bal['quq']
                 r['bnb_bal'] = bal['bnb']
             results.append(r)
             tasks[task_id]['progress'] = i + 1
