@@ -16,6 +16,13 @@ app = FastAPI(title="QUQ Alpha Scanner")
 MAX_ADDRESSES = 1000
 MAX_CONCURRENT_TASKS = 3
 
+# --- Wear Overrides ---
+# 手动修正某地址某天的 wear（如补偿、返佣冲抵等一次性修正）
+# 格式: {(地址lower, 日期str): 修正后wear}
+WEAR_OVERRIDES = {
+    ("0x9b716310fea632a0ccee88f3301a8abbf3494df0", "2026-05-24"): 3.11,  # 麦雪莲：补偿365+返佣25.4冲抵磨损
+}
+
 # --- Task store ---
 tasks: dict = {}  # task_id -> {status, progress, total, results, error, created}
 task_semaphore = threading.Semaphore(MAX_CONCURRENT_TASKS)
@@ -55,6 +62,10 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
                 r['quq_bal'] = bal['quq']
                 r['bnb_bal'] = bal['bnb']
             results.append(r)
+            # 应用 wear override（补偿/返佣修正）
+            override_key = (r.get('addr', '').lower(), tasks[task_id].get('day', ''))
+            if override_key in WEAR_OVERRIDES:
+                r['wear'] = WEAR_OVERRIDES[override_key]
             tasks[task_id]['progress'] = i + 1
             tasks[task_id]['results'] = results
         tasks[task_id]['status'] = 'done'
