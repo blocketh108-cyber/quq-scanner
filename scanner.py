@@ -2,6 +2,7 @@
 Migrated from Etherscan V2 to Ankr Advanced API (2026-04-20)."""
 import math, time, random, os
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests as req
 
 utc8 = timezone(timedelta(hours=8))
@@ -499,3 +500,54 @@ def query_balances(addr):
         'quq': _erc20_balance(QUQ, addr),
         'bnb': _bnb_balance(addr),
     }
+
+
+# --- 并发批量扫描 ---
+# 每批最多 8 个地址并发（Ankr 免费 tier 限速约 30 req/s，每地址 3 请求 = 8×3=24 req 安全）
+BATCH_CONCURRENCY = 8
+
+
+def _scan_one(addr, ts_start, ts_end, include_balances=False, algo='u'):
+    """扫描单个地址（含余额），供并发调用。"""
+    scan_fn = query_address_quq_v6 if algo == 'quq' else query_address
+    r = scan_fn(addr, ts_start, ts_end)
+    if include_balances:
+        bal = query_balances(addr)
+        r['usdt_bal'] = bal['usdt']
+        r['usdc_bal'] = bal['usdc']
+        r['usd1_bal'] = bal['usd1']
+        r['quq_bal'] = bal['quq']
+        r['bnb_bal'] = bal['bnb']
+    return r
+
+
+def scan_batch(addresses, ts_start, ts_end, include_balances=False, algo='u',
+               progress_cb=None, concurrency=BATCH_CONCURRENCY):
+    """并发扫描多个地址，返回按原始顺序排列的结果列表。
+    progress_cb(done_count) 每完成一个地址回调一次。"""
+    results = [None] * len(addresses)
+    done_count = 0
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        future_to_idx = {}
+        for i, addr in enumerate(addresses):
+            f = pool.submit(_scan_one, addr, ts_start, ts_end, include_balances, algo)
+            future_to_idx[f] = i
+
+        for f in as_completed(future_to_idx):
+            idx = future_to_idx[f]
+            try:
+                results[idx] = f.result()
+            except Exception:
+                # 失败时返回空结果
+                results[idx] = {
+                    'addr': addresses[idx].lower(),
+                    'fullAddr': addresses[idx],
+                    'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0,
+                    'bnb_tx_count': 0, 'bnb_gas_used': 0,
+                }
+            done_count += 1
+            if progress_cb:
+                progress_cb(done_count)
+
+    return results
