@@ -92,7 +92,7 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
 
 @app.get("/api/health")
 def health():
-    return {"keys_loaded": 0, "api": "ankr", "max_addresses": MAX_ADDRESSES}
+    return {"keys_loaded": 0, "api": "ankr+rpc_fallback", "max_addresses": MAX_ADDRESSES, "version": "2.1"}
 
 
 @app.get("/api/bnb-price")
