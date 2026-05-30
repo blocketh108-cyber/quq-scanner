@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from scanner import trading_window, query_address, query_address_quq_v6, query_balances, _get_bnb_price, get_quq_price, scan_batch
+from scanner import trading_window, query_address, query_address_quq_v6, query_balances, _get_bnb_price, get_quq_price, scan_batch, ANKR_URL, _ankr_available
 
 app = FastAPI(title="QUQ Alpha Scanner")
 
@@ -99,7 +99,7 @@ def health():
 def diag_ankr():
     """临时诊断：从 Railway 服务器测试 Ankr Advanced API 连通性"""
     import requests as _req, time as _t
-    url = scanner.ANKR_URL
+    url = ANKR_URL
     results = {}
     # 测试 getAccountBalance
     t0 = _t.time()
@@ -116,7 +116,8 @@ def diag_ankr():
         results["getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "response": str(data)[:200]}
     except Exception as e:
         results["getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
-    results["ankr_available"] = scanner._ankr_available
+    import scanner as _sc
+    results["ankr_available"] = _sc._ankr_available
     return results
 
 
