@@ -50,6 +50,9 @@ tr:hover{background:#252540}
 .high{background:#16a34a;color:#fff;padding:2px 8px;border-radius:10px;font-size:12px}
 .zero{color:#555}
 .error-msg{color:#f87171;margin-top:12px;font-size:14px}
+.note-input{background:#111827;border:1px solid #374151;border-radius:6px;color:#e0e0e0;font-size:12px;padding:4px 8px;width:120px;transition:border-color .2s}
+.note-input:focus{border-color:#2563eb;outline:none}
+.note-input.saved{border-color:#4ade80}
 </style></head><body>
 <h1>🦞 QUQ Alpha 扫描器</h1>
 <div class="subtitle">粘贴 BSC 地址，扫描当天 QUQ 交易磨损数据</div>
@@ -110,9 +113,11 @@ const dd = h >= 8 ? now : new Date(now - 86400000);
 dayInput.value = dd.toISOString().slice(0,10);
 
 let allResults = [], taskId = null, hasBal = false, balOnly = false, bnbPrice = 600;
+let addressNotes = {};  // addr_lower -> note
 
-// Fetch BNB price on load
+// 加载备注和 BNB 价格
 fetch('/api/bnb-price').then(r=>r.json()).then(d=>{bnbPrice=d.price||600}).catch(()=>{});
+fetch('/api/notes').then(r=>r.json()).then(d=>{addressNotes=d||{}}).catch(()=>{});
 
 function money(v){return '$'+Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
 function signedMoney(v){const n=Number(v||0);return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
@@ -255,7 +260,7 @@ function renderTable(){
   if(!balOnly) hdr+='<th>买入</th><th>卖出</th><th>磨损</th><th>BNB笔数</th><th>Gas(BNB)</th><th>Gas(U)</th><th>总磨损</th><th>积分</th>';
   if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>QUQ</th><th>BNB</th>';
   if(balOnly) hdr+='<th>总余额</th>';
-  hdr+='<th>操作</th>';
+  hdr+='<th>备注</th><th>操作</th>';
   tableHead.innerHTML=hdr;
 
   let rows=allResults.map((r,i)=>({...r,_idx:i}));
@@ -296,9 +301,28 @@ function renderTable(){
       const total=usdt_b+usdc_b+usd1_b;
       html+=`<td class="usdt">${money(total)}</td>`;
     }
+    const noteKey=(addr||'').toLowerCase();
+    const noteVal=addressNotes[noteKey]||'';
+    html+=`<td><input class="note-input" data-addr="${addr}" value="${noteVal.replace(/"/g,'&quot;')}" placeholder="添加备注..." onblur="saveNote(this)" onkeydown="if(event.key==='Enter'){this.blur()}"></td>`;
     html+=`<td><button class="btn-mini" id="rb-${r._idx}" onclick="refreshRow('${addr}',${r._idx})">🔄</button></td>`;
     tr.innerHTML=html;
     tbody.appendChild(tr);
   });
+}
+
+async function saveNote(el){
+  const addr=el.dataset.addr;
+  const note=el.value.trim();
+  const key=addr.toLowerCase();
+  // 如果没变化就不发请求
+  if((addressNotes[key]||'')=== note) return;
+  try{
+    const res=await fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:addr,note:note})});
+    if(res.ok){
+      if(note) addressNotes[key]=note; else delete addressNotes[key];
+      el.classList.add('saved');
+      setTimeout(()=>el.classList.remove('saved'),1500);
+    }
+  }catch(e){console.error('保存备注失败',e)}
 }
 </script></body></html>

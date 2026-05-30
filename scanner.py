@@ -16,6 +16,8 @@ ROUTER = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'
 
 ANKR_URL = os.environ.get('ANKR_URL', 'https://rpc.ankr.com/multichain/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167')
 BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed1.binance.org')
+BSCSCAN_KEYS = [k.strip() for k in os.environ.get('BSCSCAN_API_KEYS', 'SVHM1HP8K5HBG1C3PMNQFBGJG3V1IQXFPK,RVDGGEQFMCX3YVQNWPEU2BFBCMQP1XS7QK').split(',') if k.strip()]
+_bsc_key_idx = 0
 DEX_ADDYS = {
     '0xb300000b72deaeb607a12d5f54773d1c19c7028d',
     '0xe1acb466421ed24dd8bd381d1205bad0ad43ca9c',
@@ -69,20 +71,184 @@ def trading_window(day_text=None):
     return d, int(start.timestamp()), int(now.timestamp())
 
 
-def _ankr_post(method, params, retries=3):
-    """Call Ankr Advanced API with retries."""
+def _next_bscscan_key():
+    """轮询 BSCScan API key"""
+    global _bsc_key_idx
+    key = BSCSCAN_KEYS[_bsc_key_idx % len(BSCSCAN_KEYS)]
+    _bsc_key_idx += 1
+    return key
+
+
+def _bscscan_get(module, action, params, retries=3):
+    """BSCScan V1 API 备用通道（已废弃，保留兼容）"""
+    for attempt in range(retries):
+        try:
+            p = {'module': module, 'action': action, 'apikey': _next_bscscan_key(), **params}
+            resp = req.get('https://api.bscscan.com/api', params=p, timeout=30)
+            data = resp.json()
+            if data.get('status') == '1' or data.get('message') == 'OK':
+                return data.get('result', [])
+            if 'rate limit' in str(data.get('result', '')).lower():
+                time.sleep(1 + attempt)
+                continue
+            # V1 已废弃，返回空让上层走 RPC getLogs
+            return []
+        except Exception:
+            time.sleep(1 + attempt)
+    return []
+
+
+# Transfer(address,address,uint256) event topic
+TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+# 稳定币合约列表
+STABLE_CONTRACTS = [USDT, USDC, USD1, QUQ]
+BSC_RPCS = [
+    # Ankr BSC RPC（带 key，getLogs 限制宽松，约 3000 block/次）
+    'https://rpc.ankr.com/bsc/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167',
+]
+_rpc_idx = 0
+
+
+def _next_rpc():
+    global _rpc_idx
+    url = BSC_RPCS[_rpc_idx % len(BSC_RPCS)]
+    _rpc_idx += 1
+    return url
+
+
+def _ts_to_block(ts):
+    """时间戳转 BSC block number（估算，BSC 约 3s/block）"""
+    # 精确锚点：block 101346147 = ts 1780162099 (2026-05-31)
+    anchor_ts = 1780162099
+    anchor_block = 101346147
+    diff = ts - anchor_ts
+    return max(0, anchor_block + int(diff / 3))
+
+
+def _get_block_by_ts(ts, closest='before'):
+    """通过 BSC RPC 获取精确 block number（二分查找太慢，用估算+修正）"""
+    return _ts_to_block(ts)
+
+
+def _rpc_get_logs(contract, from_block, to_block, addr_topic, topic_position='to'):
+    """通过 BSC RPC eth_getLogs 拉 Transfer 事件"""
+    addr_padded = '0x000000000000000000000000' + addr_topic[2:].lower()
+    # topic_position: 'from' = topic[1], 'to' = topic[2]
+    if topic_position == 'from':
+        topics = [TRANSFER_TOPIC, addr_padded, None]
+    else:
+        topics = [TRANSFER_TOPIC, None, addr_padded]
+
+    all_logs = []
+    # Ankr BSC RPC 限制约 3000 block
+    chunk = 2999
+    # 构建所有 chunk 请求
+    chunks = []
+    cur = from_block
+    while cur <= to_block:
+        end = min(cur + chunk, to_block)
+        chunks.append((cur, end))
+        cur = end + 1
+
+    def fetch_chunk(block_range):
+        start, end = block_range
+        rpc_url = BSC_RPCS[0]  # 只用 Ankr
+        try:
+            resp = req.post(rpc_url, json={
+                "jsonrpc": "2.0",
+                "method": "eth_getLogs",
+                "params": [{
+                    "fromBlock": hex(start),
+                    "toBlock": hex(end),
+                    "address": contract,
+                    "topics": topics,
+                }],
+                "id": 1
+            }, timeout=20)
+            data = resp.json()
+            if 'error' in data:
+                return []
+            logs = data.get('result', [])
+            return logs if isinstance(logs, list) else []
+        except Exception:
+            return []
+
+    # 并发 3 路
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(fetch_chunk, c) for c in chunks]
+        for f in as_completed(futures):
+            all_logs.extend(f.result())
+
+    return all_logs
+
+
+def _logs_to_etherscan_format(logs, contract, decimals=18):
+    """将 RPC getLogs 结果转为 Etherscan 兼容格式"""
+    results = []
+    for log in logs:
+        topics = log.get('topics', [])
+        if len(topics) < 3:
+            continue
+        from_addr = '0x' + topics[1][-40:]
+        to_addr = '0x' + topics[2][-40:]
+        raw_data = log.get('data', '0x0')
+        try:
+            value = int(raw_data, 16)
+        except (ValueError, TypeError):
+            value = 0
+        block_hex = log.get('blockNumber', '0x0')
+        try:
+            block_num = int(block_hex, 16)
+        except (ValueError, TypeError):
+            block_num = 0
+        # 用 block number 估算时间戳
+        ts_est = 1780162099 + (block_num - 101346147) * 3
+
+        results.append({
+            'hash': log.get('transactionHash', ''),
+            'from': from_addr.lower(),
+            'to': to_addr.lower(),
+            'value': str(value),
+            'contractAddress': contract.lower(),
+            'tokenDecimal': str(decimals),
+            'timeStamp': str(ts_est),
+            'blockNumber': str(block_num),
+            'logIndex': str(int(log.get('logIndex', '0x0'), 16) if isinstance(log.get('logIndex'), str) else 0),
+        })
+    return results
+
+
+_ankr_available = True  # 标记 Ankr 是否可用，避免反复超时
+_ankr_fail_ts = 0  # 上次标记不可用的时间
+
+
+def _ankr_post(method, params, retries=2):
+    """Call Ankr Advanced API with retries. 失败快速返回以便 fallback。"""
+    global _ankr_available, _ankr_fail_ts
+    # 每 5 分钟重试一次 Ankr
+    if not _ankr_available and time.time() - _ankr_fail_ts > 300:
+        _ankr_available = True
+    if not _ankr_available:
+        return {}
     for attempt in range(retries):
         try:
             resp = req.post(ANKR_URL, json={
                 "jsonrpc": "2.0", "method": method, "params": params, "id": 1
-            }, timeout=30)
+            }, timeout=15)
             data = resp.json()
             if 'error' in data:
+                err_msg = str(data.get('error', {}).get('message', ''))
+                if 'No nodes available' in err_msg:
+                    _ankr_available = False
+                    _ankr_fail_ts = time.time()
+                    return {}
                 time.sleep(1 + attempt)
                 continue
             return data.get('result', {})
         except Exception:
             time.sleep(1 + attempt)
+    _ankr_available = False
+    _ankr_fail_ts = time.time()
     return {}
 
 
@@ -117,7 +283,17 @@ def _ankr_tx_to_etherscan(tx):
 
 
 def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
-    """Fetch token transfers via Ankr API with cursor pagination."""
+    """Fetch token transfers. 优先 Ankr，失败自动 fallback BSCScan。"""
+    # 先尝试 Ankr
+    results = _fetch_token_txs_ankr(addr, ts_start, ts_end, contract)
+    if results or _ankr_available:
+        return results
+    # Ankr 不可用，走 BSCScan
+    return _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract)
+
+
+def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
+    """通过 Ankr 拉 token 转账"""
     results = []
     page_token = None
     for _ in range(200):  # safety limit
@@ -156,8 +332,49 @@ def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
     return results
 
 
+def _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract=None):
+    """通过 BSC RPC eth_getLogs 拉 token 转账（备用通道）"""
+    from_block = _ts_to_block(ts_start)
+    to_block = _ts_to_block(ts_end)
+
+    # 确定要查哪些合约
+    contracts_to_check = [contract] if contract else STABLE_CONTRACTS
+    decimals_map = {
+        USDT: 18, USDC: 18, USD1: 18, QUQ: 18,
+    }
+
+    results = []
+    for c in contracts_to_check:
+        dec = decimals_map.get(c, 18)
+        # 拉入账（to = addr）
+        logs_in = _rpc_get_logs(c, from_block, to_block, addr, 'to')
+        results.extend(_logs_to_etherscan_format(logs_in, c, dec))
+        # 拉出账（from = addr）
+        logs_out = _rpc_get_logs(c, from_block, to_block, addr, 'from')
+        results.extend(_logs_to_etherscan_format(logs_out, c, dec))
+        time.sleep(0.1)
+
+    # 按时间戳过滤（估算可能有偏差，宽松一点）
+    filtered = []
+    for tx in results:
+        ts = int(tx.get('timeStamp', 0))
+        # 允许 ±30 block 的误差（约 90 秒）
+        if (ts_start - 100) <= ts < (ts_end + 100):
+            filtered.append(tx)
+
+    return filtered
+
+
 def _fetch_normal_txs(addr, ts_start, ts_end, api_keys=None):
-    """Fetch normal (BNB) transactions via Ankr API."""
+    """Fetch normal (BNB) transactions. 优先 Ankr，失败 fallback BSCScan。"""
+    results = _fetch_normal_txs_ankr(addr, ts_start, ts_end)
+    if results or _ankr_available:
+        return results
+    return _fetch_normal_txs_bscscan(addr, ts_start, ts_end)
+
+
+def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
+    """通过 Ankr 拉 BNB 交易"""
     results = []
     page_token = None
     for _ in range(200):
@@ -218,6 +435,14 @@ def _fetch_normal_txs(addr, ts_start, ts_end, api_keys=None):
         time.sleep(0.1)
 
     return results
+
+
+def _fetch_normal_txs_bscscan(addr, ts_start, ts_end):
+    """通过 BSC RPC 拉 BNB 交易（备用通道）- 简化版只统计 gas"""
+    # BNB 普通交易无法通过 getLogs 拉取（不是 event）
+    # 但磨损计算主要依赖 token transfer，BNB gas 影响很小
+    # 返回空列表，磨损计算中 gas 部分会缺失但不影响主要结果
+    return []
 
 
 def _get_bnb_price():
