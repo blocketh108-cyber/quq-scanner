@@ -95,6 +95,31 @@ def health():
     return {"keys_loaded": 0, "api": "ankr+rpc_fallback", "max_addresses": MAX_ADDRESSES, "version": "2.1"}
 
 
+@app.get("/api/diag-ankr")
+def diag_ankr():
+    """临时诊断：从 Railway 服务器测试 Ankr Advanced API 连通性"""
+    import requests as _req, time as _t
+    url = scanner.ANKR_URL
+    results = {}
+    # 测试 getAccountBalance
+    t0 = _t.time()
+    try:
+        r = _req.post(url, json={"jsonrpc":"2.0","method":"ankr_getAccountBalance","params":{"blockchain":"bsc","walletAddress":"0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A"},"id":1}, timeout=15)
+        results["getAccountBalance"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "ok": "result" in r.json()}
+    except Exception as e:
+        results["getAccountBalance"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
+    # 测试 getTokenTransfers
+    t0 = _t.time()
+    try:
+        r = _req.post(url, json={"jsonrpc":"2.0","method":"ankr_getTokenTransfers","params":{"blockchain":"bsc","address":["0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A"],"pageSize":5},"id":1}, timeout=15)
+        data = r.json()
+        results["getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "response": str(data)[:200]}
+    except Exception as e:
+        results["getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
+    results["ankr_available"] = scanner._ankr_available
+    return results
+
+
 @app.get("/api/bnb-price")
 def bnb_price():
     return {"price": _get_bnb_price()}
