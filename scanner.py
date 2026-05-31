@@ -16,6 +16,10 @@ ROUTER = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'
 
 ANKR_URL = os.environ.get('ANKR_URL', 'https://rpc.ankr.com/multichain/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167')
 BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed1.binance.org')
+
+# Moralis API（Ankr Advanced 挂了时的替代）
+MORALIS_API_KEY = os.environ.get('MORALIS_API_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImJmYzQ4MzM2LTU0ZTEtNGUxNy1hYTk4LTQxZTg1MmYwNDIxYyIsIm9yZ0lkIjoiNTE4MjE5IiwidXNlcklkIjoiNTMzMzAxIiwidHlwZUlkIjoiYmUzMDVjN2UtN2I5ZC00NTVjLThhYTEtOWUyNGM3NDMzNjNiIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3ODAyMTE4NjcsImV4cCI6NDkzNTk3MTg2N30.B2tBBXELeAQYsTAh3UwXt5I7c64SlugNsFtcsus7qlQ')
+MORALIS_BASE = 'https://deep-index.moralis.io/api/v2.2'
 BSCSCAN_KEYS = [k.strip() for k in os.environ.get('BSCSCAN_API_KEYS', 'SVHM1HP8K5HBG1C3PMNQFBGJG3V1IQXFPK,RVDGGEQFMCX3YVQNWPEU2BFBCMQP1XS7QK').split(',') if k.strip()]
 _bsc_key_idx = 0
 DEX_ADDYS = {
@@ -173,8 +177,8 @@ def _rpc_get_logs(contract, from_block, to_block, addr_topic, topic_position='to
         except Exception:
             return []
 
-    # 并发 3 路
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    # 并发 10 路
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = [pool.submit(fetch_chunk, c) for c in chunks]
         for f in as_completed(futures):
             all_logs.extend(f.result())
@@ -220,6 +224,8 @@ def _logs_to_etherscan_format(logs, contract, decimals=18):
 
 _ankr_available = True  # 标记 Ankr 是否可用，避免反复超时
 _ankr_fail_ts = 0  # 上次标记不可用的时间
+_moralis_available = True  # Moralis 可用标记
+_moralis_fail_ts = 0
 
 
 def _ankr_post(method, params, retries=2):
@@ -282,13 +288,156 @@ def _ankr_tx_to_etherscan(tx):
     }
 
 
+def _moralis_get(endpoint, params=None, retries=2):
+    """Moralis REST API GET 请求。"""
+    global _moralis_available, _moralis_fail_ts
+    if not _moralis_available and time.time() - _moralis_fail_ts > 300:
+        _moralis_available = True
+    if not _moralis_available:
+        return None
+    headers = {'accept': 'application/json', 'X-API-Key': MORALIS_API_KEY}
+    url = f'{MORALIS_BASE}/{endpoint}'
+    for attempt in range(retries):
+        try:
+            resp = req.get(url, headers=headers, params=params, timeout=20)
+            if resp.status_code == 429:
+                time.sleep(1 + attempt)
+                continue
+            if resp.status_code != 200:
+                if resp.status_code >= 500:
+                    _moralis_available = False
+                    _moralis_fail_ts = time.time()
+                return None
+            return resp.json()
+        except Exception:
+            time.sleep(1 + attempt)
+    _moralis_available = False
+    _moralis_fail_ts = time.time()
+    return None
+
+
+def _moralis_tx_to_etherscan(tx):
+    """Convert Moralis ERC20 transfer to Etherscan-compatible dict."""
+    block_ts_str = tx.get('block_timestamp', '')
+    try:
+        ts_val = int(datetime.fromisoformat(block_ts_str.replace('Z', '+00:00')).timestamp())
+    except Exception:
+        ts_val = 0
+    decimals = int(tx.get('token_decimals') or tx.get('decimals') or 18)
+    raw_val = tx.get('value', '0')
+    try:
+        value_raw = int(raw_val)
+    except (ValueError, TypeError):
+        value_raw = 0
+    return {
+        'hash': tx.get('transaction_hash', ''),
+        'from': (tx.get('from_address') or '').lower(),
+        'to': (tx.get('to_address') or '').lower(),
+        'value': str(value_raw),
+        'contractAddress': (tx.get('address') or '').lower(),
+        'tokenDecimal': str(decimals),
+        'timeStamp': str(ts_val),
+        'logIndex': str(tx.get('log_index', 0)),
+    }
+
+
+def _fetch_token_txs_moralis(addr, ts_start, ts_end, contract=None):
+    """通过 Moralis 拉 token 转账"""
+    from_date = datetime.fromtimestamp(ts_start, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    to_date = datetime.fromtimestamp(ts_end, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    results = []
+    cursor = None
+    for _ in range(50):  # safety limit
+        params = {
+            'chain': 'bsc',
+            'from_date': from_date,
+            'to_date': to_date,
+            'limit': 100,
+            'order': 'DESC',
+        }
+        if contract:
+            params['contract_addresses'] = [contract]
+        if cursor:
+            params['cursor'] = cursor
+        data = _moralis_get(f'{addr}/erc20/transfers', params)
+        if not data:
+            break
+        transfers = data.get('result', [])
+        if not transfers:
+            break
+        for tx in transfers:
+            eth_tx = _moralis_tx_to_etherscan(tx)
+            ts = int(eth_tx['timeStamp'])
+            if ts_start <= ts < ts_end:
+                if contract and eth_tx['contractAddress'] != contract.lower():
+                    continue
+                results.append(eth_tx)
+        cursor = data.get('cursor')
+        if not cursor:
+            break
+        time.sleep(0.2)
+    return results
+
+
+def _fetch_normal_txs_moralis(addr, ts_start, ts_end):
+    """通过 Moralis 拉 BNB 原生交易"""
+    from_date = datetime.fromtimestamp(ts_start, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    to_date = datetime.fromtimestamp(ts_end, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    results = []
+    cursor = None
+    for _ in range(10):
+        params = {
+            'chain': 'bsc',
+            'from_date': from_date,
+            'to_date': to_date,
+            'limit': 100,
+            'order': 'DESC',
+        }
+        if cursor:
+            params['cursor'] = cursor
+        data = _moralis_get(addr, params)
+        if not data:
+            break
+        txs = data.get('result', [])
+        if not txs:
+            break
+        for tx in txs:
+            block_ts_str = tx.get('block_timestamp', '')
+            try:
+                ts_val = int(datetime.fromisoformat(block_ts_str.replace('Z', '+00:00')).timestamp())
+            except Exception:
+                continue
+            if ts_start <= ts_val < ts_end:
+                value = tx.get('value', '0')
+                gas_used = tx.get('receipt_gas_used') or tx.get('gas_used', '0')
+                gas_price = tx.get('gas_price', '0')
+                results.append({
+                    'hash': tx.get('hash', ''),
+                    'from': (tx.get('from_address') or '').lower(),
+                    'to': (tx.get('to_address') or '').lower(),
+                    'value': str(value),
+                    'gasUsed': str(gas_used),
+                    'gasPrice': str(gas_price),
+                    'timeStamp': str(ts_val),
+                })
+        cursor = data.get('cursor')
+        if not cursor:
+            break
+        time.sleep(0.2)
+    return results
+
+
 def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
-    """Fetch token transfers. 优先 Ankr，失败自动 fallback BSCScan。"""
+    """Fetch token transfers. 优先 Ankr → Moralis → BSCScan eth_getLogs。"""
     # 先尝试 Ankr
     results = _fetch_token_txs_ankr(addr, ts_start, ts_end, contract)
     if results or _ankr_available:
         return results
-    # Ankr 不可用，走 BSCScan
+    # Ankr 不可用，尝试 Moralis
+    results = _fetch_token_txs_moralis(addr, ts_start, ts_end, contract)
+    if results or _moralis_available:
+        return results
+    # 都不可用，走 BSCScan eth_getLogs
     return _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract)
 
 
@@ -366,9 +515,13 @@ def _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract=None):
 
 
 def _fetch_normal_txs(addr, ts_start, ts_end, api_keys=None):
-    """Fetch normal (BNB) transactions. 优先 Ankr，失败 fallback BSCScan。"""
+    """Fetch normal (BNB) transactions. 优先 Ankr → Moralis → 空（BNB gas 影响小）。"""
     results = _fetch_normal_txs_ankr(addr, ts_start, ts_end)
     if results or _ankr_available:
+        return results
+    # Ankr 不可用，尝试 Moralis
+    results = _fetch_normal_txs_moralis(addr, ts_start, ts_end)
+    if results or _moralis_available:
         return results
     return _fetch_normal_txs_bscscan(addr, ts_start, ts_end)
 
@@ -729,7 +882,7 @@ def query_balances(addr):
 
 # --- 并发批量扫描 ---
 # 每批最多 8 个地址并发（Ankr 免费 tier 限速约 30 req/s，每地址 3 请求 = 8×3=24 req 安全）
-BATCH_CONCURRENCY = 8
+BATCH_CONCURRENCY = 15
 
 
 def _scan_one(addr, ts_start, ts_end, include_balances=False, algo='u'):
