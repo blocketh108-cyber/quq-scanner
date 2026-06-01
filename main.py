@@ -97,27 +97,40 @@ def health():
 
 @app.get("/api/diag-ankr")
 def diag_ankr():
-    """临时诊断：从 Railway 服务器测试 Ankr Advanced API 连通性"""
+    """诊断：测试所有数据源连通性"""
     import requests as _req, time as _t
+    import scanner as _sc
     url = ANKR_URL
     results = {}
-    # 测试 getAccountBalance
-    t0 = _t.time()
-    try:
-        r = _req.post(url, json={"jsonrpc":"2.0","method":"ankr_getAccountBalance","params":{"blockchain":"bsc","walletAddress":"0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A"},"id":1}, timeout=15)
-        results["getAccountBalance"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "ok": "result" in r.json()}
-    except Exception as e:
-        results["getAccountBalance"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
-    # 测试 getTokenTransfers
+    # 状态
+    results["ankr_available"] = _sc._ankr_available
+    results["moralis_available"] = _sc._moralis_available
+    results["ankr_fail_ts"] = _sc._ankr_fail_ts
+    results["moralis_fail_ts"] = _sc._moralis_fail_ts
+    # 测试 Ankr getTokenTransfers
     t0 = _t.time()
     try:
         r = _req.post(url, json={"jsonrpc":"2.0","method":"ankr_getTokenTransfers","params":{"blockchain":"bsc","address":["0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A"],"pageSize":5},"id":1}, timeout=15)
         data = r.json()
-        results["getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "response": str(data)[:200]}
+        results["ankr_getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "ok": "result" in data and bool(data["result"].get("transfers"))}
     except Exception as e:
-        results["getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
-    import scanner as _sc
-    results["ankr_available"] = _sc._ankr_available
+        results["ankr_getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
+    # 测试 Moralis
+    t0 = _t.time()
+    try:
+        headers = {'accept': 'application/json', 'X-API-Key': _sc.MORALIS_API_KEY}
+        r = _req.get(f'{_sc.MORALIS_BASE}/0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A/erc20/transfers', headers=headers, params={'chain':'bsc','limit':3}, timeout=20)
+        results["moralis_transfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "count": len(r.json().get("result",[])) if r.status_code==200 else 0}
+    except Exception as e:
+        results["moralis_transfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
+    # 测试 BSC RPC eth_getLogs
+    t0 = _t.time()
+    try:
+        r = _req.post(_sc.BSC_RPCS[0], json={"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}, timeout=10)
+        block = int(r.json()["result"], 16)
+        results["bsc_rpc"] = {"ms": int((_t.time()-t0)*1000), "latest_block": block}
+    except Exception as e:
+        results["bsc_rpc"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
     return results
 
 

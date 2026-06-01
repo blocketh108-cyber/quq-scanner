@@ -121,12 +121,12 @@ def _next_rpc():
 
 
 def _ts_to_block(ts):
-    """时间戳转 BSC block number（估算，BSC 约 3s/block）"""
-    # 精确锚点：block 101346147 = ts 1780162099 (2026-05-31)
-    anchor_ts = 1780162099
-    anchor_block = 101346147
+    """时间戳转 BSC block number（估算，BSC 当前约 0.45s/block）"""
+    # 精确锚点：block 101686331 = ts 1780315365 (2026-06-01 19:29 CST)
+    anchor_ts = 1780315365
+    anchor_block = 101686331
     diff = ts - anchor_ts
-    return max(0, anchor_block + int(diff / 3))
+    return max(0, anchor_block + int(diff / 0.45))
 
 
 def _get_block_by_ts(ts, closest='before'):
