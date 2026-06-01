@@ -8,8 +8,30 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from scanner import trading_window, query_address, query_address_quq_v6, query_balances, _get_bnb_price, get_quq_price, scan_batch, ANKR_URL, _ankr_available
+import scanner as _scanner_mod
 
 app = FastAPI(title="QUQ Alpha Scanner")
+
+
+@app.on_event("startup")
+def _probe_ankr_on_startup():
+    """启动时探测 Ankr 可用性，避免第一个扫描请求浪费 15 秒超时"""
+    import requests, threading
+    def _probe():
+        try:
+            r = requests.post(ANKR_URL, json={
+                "jsonrpc": "2.0", "method": "ankr_getTokenTransfers",
+                "params": {"blockchain": "bsc", "address": ["0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A"], "pageSize": 1},
+                "id": 1
+            }, timeout=10)
+            data = r.json()
+            if "result" not in data or not data["result"].get("transfers"):
+                _scanner_mod._ankr_available = False
+                _scanner_mod._ankr_fail_ts = time.time()
+        except Exception:
+            _scanner_mod._ankr_available = False
+            _scanner_mod._ankr_fail_ts = time.time()
+    threading.Thread(target=_probe, daemon=True).start()
 
 # --- 备注存储 ---
 NOTES_FILE = os.path.join(os.path.dirname(__file__), 'data', 'address-notes.json')
