@@ -700,6 +700,20 @@ def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
                     buy += v['usdt_out']
                     sell += v['usdt_in']
 
+            # 供应商逐笔计数：对所有 QUQ swap 交易按内部 verbose log 命中的聚合器归类
+            v_lifi = v_lm = v_pancake = v_other = 0
+            prewarm_vendor_cache(quq_hashes)
+            for h in quq_hashes:
+                vendor = classify_swap_vendor(h)
+                if vendor == 'LiFi':
+                    v_lifi += 1
+                elif vendor == 'Liquidmesh':
+                    v_lm += 1
+                elif vendor == 'Pancake':
+                    v_pancake += 1
+                else:
+                    v_other += 1
+
             # Rebate detection
             non_quq_by_cp = {}
             for tx in all_usdt:
@@ -741,11 +755,16 @@ def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
                 'points': int(math.floor(math.log2(buy / 2)) + 1) if buy >= 2 else 0,
                 'bnb_tx_count': bnb_tx_count,
                 'bnb_gas_used': bnb_gas_used,
+                'v_lifi': v_lifi,
+                'v_liquidmesh': v_lm,
+                'v_pancake': v_pancake,
+                'v_other': v_other,
             }
         except Exception:
             pass
         time.sleep(0.5)
-    return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0, 'bnb_tx_count': 0, 'bnb_gas_used': 0}
+    return {'addr': a_lower, 'fullAddr': addr, 'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0, 'bnb_tx_count': 0, 'bnb_gas_used': 0,
+            'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0}
 
 
 # --- Balance queries via RPC ---
