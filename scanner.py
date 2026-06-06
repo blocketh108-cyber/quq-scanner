@@ -12,16 +12,13 @@ USDC = '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d'
 USD1 = '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d'
 QUQ  = '0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf'
 BNB_PLACEHOLDER = 'BNB'
-ROUTER = '0xb300000b72deaeb607a12d5f54773d1c19c7028d'
 
 ANKR_URL = os.environ.get('ANKR_URL', 'https://rpc.ankr.com/multichain/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167')
-BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed1.binance.org')
+BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed.bnbchain.org')
 
-# Moralis API（Ankr Advanced 挂了时的替代）
+# Moralis API（主数据源，2026-06-06 起统一走 Moralis，已弃用 BscScan）
 MORALIS_API_KEY = os.environ.get('MORALIS_API_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImJmYzQ4MzM2LTU0ZTEtNGUxNy1hYTk4LTQxZTg1MmYwNDIxYyIsIm9yZ0lkIjoiNTE4MjE5IiwidXNlcklkIjoiNTMzMzAxIiwidHlwZUlkIjoiYmUzMDVjN2UtN2I5ZC00NTVjLThhYTEtOWUyNGM3NDMzNjNiIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3ODAyMTE4NjcsImV4cCI6NDkzNTk3MTg2N30.B2tBBXELeAQYsTAh3UwXt5I7c64SlugNsFtcsus7qlQ')
 MORALIS_BASE = 'https://deep-index.moralis.io/api/v2.2'
-BSCSCAN_KEYS = [k.strip() for k in os.environ.get('BSCSCAN_API_KEYS', 'SVHM1HP8K5HBG1C3PMNQFBGJG3V1IQXFPK,RVDGGEQFMCX3YVQNWPEU2BFBCMQP1XS7QK').split(',') if k.strip()]
-_bsc_key_idx = 0
 DEX_ADDYS = {
     '0xb300000b72deaeb607a12d5f54773d1c19c7028d',
     '0xe1acb466421ed24dd8bd381d1205bad0ad43ca9c',
@@ -29,6 +26,61 @@ DEX_ADDYS = {
     '0xf351e2befbe9c3744d890304d1af0e4987568d05',
     '0xee57c25eaa31d453be7da41f70805e7b5e6ef83d',
 }
+
+# --- swap 供应商分类（按交易内部 verbose log 命中的聚合器/池子归类，不看入口 to）---
+# 已链上实测锁定（BSC chain 56）：同一入口 b30000 壳 + 同一 selector 0x810c705b，
+# 既可能内部走 LiFi 也可能走 Liquidmesh，唯一可靠依据是逐笔 verbose log 命中哪个聚合器合约。
+LIFI_DIAMOND   = '0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae'  # LiFi 官方 LiFiDiamond
+LM_ROUTER      = '0x3d90f66b534dd8482b181e24655a9e8265316be9'  # Liquidmesh 官方 Router（全 EVM 统一）
+PANCAKE_POOLS  = {
+    '0xe1acb466421ed24dd8bd381d1205bad0ad43ca9c',  # PancakeV3 USDT/QUQ 主池
+    '0x28e2ea090877bf75740558f6bfb36a5ffee9e9df',  # PancakeInfinity PoolManager（底层成交）
+}
+_VENDOR_CACHE = {}  # txhash -> 'LiFi' | 'Liquidmesh' | 'Pancake' | None
+
+
+def classify_swap_vendor(txhash):
+    """对单笔 swap 交易拉 Moralis verbose log，按内部命中的聚合器合约判定供应商。
+    返回 'LiFi' / 'Liquidmesh' / 'Pancake' / None（未命中已知聚合器）。结果按 hash 缓存。
+    """
+    h = txhash.lower()
+    if h in _VENDOR_CACHE:
+        return _VENDOR_CACHE[h]
+    data = _moralis_get(f'transaction/{h}/verbose', {'chain': 'bsc'})
+    vendor = None
+    if data:
+        addrs = set()
+        for lg in data.get('logs', []):
+            a = (lg.get('address') or '').lower()
+            if a:
+                addrs.add(a)
+        if LIFI_DIAMOND in addrs:
+            vendor = 'LiFi'
+        elif LM_ROUTER in addrs:
+            vendor = 'Liquidmesh'
+        elif addrs & PANCAKE_POOLS:
+            # 未经聚合器、直连 Pancake 池成交
+            vendor = 'Pancake'
+    _VENDOR_CACHE[h] = vendor
+    return vendor
+
+
+def prewarm_vendor_cache(hashes, workers=10):
+    """并发预拉一批 swap 交易的 verbose log 填充 _VENDOR_CACHE。
+    主循环随后调用 classify_swap_vendor 时全部命中缓存，避免串行慢。
+    _VENDOR_CACHE 单 key 赋值在 GIL 下线程安全。
+    """
+    todo = [h.lower() for h in hashes if h.lower() not in _VENDOR_CACHE]
+    if not todo:
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(classify_swap_vendor, h) for h in todo]
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception:
+                pass
+
 
 # QUQ v6 算法常量
 PRINCIPAL_SRC = '0x4201e0e98fa3b33483fcd009149b390302760d67'  # 团队本金注入源
@@ -75,40 +127,15 @@ def trading_window(day_text=None):
     return d, int(start.timestamp()), int(now.timestamp())
 
 
-def _next_bscscan_key():
-    """轮询 BSCScan API key"""
-    global _bsc_key_idx
-    key = BSCSCAN_KEYS[_bsc_key_idx % len(BSCSCAN_KEYS)]
-    _bsc_key_idx += 1
-    return key
-
-
-def _bscscan_get(module, action, params, retries=3):
-    """BSCScan V1 API 备用通道（已废弃，保留兼容）"""
-    for attempt in range(retries):
-        try:
-            p = {'module': module, 'action': action, 'apikey': _next_bscscan_key(), **params}
-            resp = req.get('https://api.bscscan.com/api', params=p, timeout=30)
-            data = resp.json()
-            if data.get('status') == '1' or data.get('message') == 'OK':
-                return data.get('result', [])
-            if 'rate limit' in str(data.get('result', '')).lower():
-                time.sleep(1 + attempt)
-                continue
-            # V1 已废弃，返回空让上层走 RPC getLogs
-            return []
-        except Exception:
-            time.sleep(1 + attempt)
-    return []
-
-
 # Transfer(address,address,uint256) event topic
 TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 # 稳定币合约列表
 STABLE_CONTRACTS = [USDT, USDC, USD1, QUQ]
 BSC_RPCS = [
-    # Ankr BSC RPC（带 key，getLogs 限制宽松，约 3000 block/次）
-    'https://rpc.ankr.com/bsc/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167',
+    # 公共 BSC RPC（兜底 getLogs 用，主数据源是 Moralis）
+    'https://bsc-dataseed.bnbchain.org',
+    'https://bsc-dataseed1.defibit.io',
+    'https://bsc.publicnode.com',
 ]
 _rpc_idx = 0
 
@@ -144,8 +171,8 @@ def _rpc_get_logs(contract, from_block, to_block, addr_topic, topic_position='to
         topics = [TRANSFER_TOPIC, None, addr_padded]
 
     all_logs = []
-    # Ankr BSC RPC 限制约 3000 block
-    chunk = 2999
+    # 公共 BSC RPC getLogs 限制较严，块跨度压到 999
+    chunk = 999
     # 构建所有 chunk 请求
     chunks = []
     cur = from_block
@@ -156,26 +183,28 @@ def _rpc_get_logs(contract, from_block, to_block, addr_topic, topic_position='to
 
     def fetch_chunk(block_range):
         start, end = block_range
-        rpc_url = BSC_RPCS[0]  # 只用 Ankr
-        try:
-            resp = req.post(rpc_url, json={
-                "jsonrpc": "2.0",
-                "method": "eth_getLogs",
-                "params": [{
-                    "fromBlock": hex(start),
-                    "toBlock": hex(end),
-                    "address": contract,
-                    "topics": topics,
-                }],
-                "id": 1
-            }, timeout=20)
-            data = resp.json()
-            if 'error' in data:
-                return []
-            logs = data.get('result', [])
-            return logs if isinstance(logs, list) else []
-        except Exception:
-            return []
+        # 单 chunk 失败时轮换公共节点重试，规避单点限流
+        for rpc_url in BSC_RPCS:
+            try:
+                resp = req.post(rpc_url, json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getLogs",
+                    "params": [{
+                        "fromBlock": hex(start),
+                        "toBlock": hex(end),
+                        "address": contract,
+                        "topics": topics,
+                    }],
+                    "id": 1
+                }, timeout=20)
+                data = resp.json()
+                if 'error' in data:
+                    continue
+                logs = data.get('result', [])
+                return logs if isinstance(logs, list) else []
+            except Exception:
+                continue
+        return []
 
     # 并发 10 路
     with ThreadPoolExecutor(max_workers=10) as pool:
@@ -288,29 +317,34 @@ def _ankr_tx_to_etherscan(tx):
     }
 
 
-def _moralis_get(endpoint, params=None, retries=2):
-    """Moralis REST API GET 请求。"""
+def _moralis_get(endpoint, params=None, retries=5):
+    """Moralis REST API GET 请求（主数据源）。500/429 视为瞬时抖动需重试。"""
     global _moralis_available, _moralis_fail_ts
     if not _moralis_available and time.time() - _moralis_fail_ts > 300:
         _moralis_available = True
     if not _moralis_available:
         return None
-    headers = {'accept': 'application/json', 'X-API-Key': MORALIS_API_KEY}
+    headers = {
+        'accept': 'application/json',
+        'X-API-Key': MORALIS_API_KEY,
+        # Cloudflare error 1010 拦默认 python-requests UA，必须伪装 Chrome
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
     url = f'{MORALIS_BASE}/{endpoint}'
     for attempt in range(retries):
         try:
             resp = req.get(url, headers=headers, params=params, timeout=20)
-            if resp.status_code == 429:
-                time.sleep(1 + attempt)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 429 or resp.status_code >= 500:
+                # 限流 / 服务端瞬时抖动，退避重试
+                time.sleep(1.2 * (attempt + 1))
                 continue
-            if resp.status_code != 200:
-                if resp.status_code >= 500:
-                    _moralis_available = False
-                    _moralis_fail_ts = time.time()
-                return None
-            return resp.json()
+            # 其余 4xx = 请求本身问题，重试无意义
+            return None
         except Exception:
-            time.sleep(1 + attempt)
+            time.sleep(1.2 * (attempt + 1))
+    # 重试全部用尽才熔断 300 秒
     _moralis_available = False
     _moralis_fail_ts = time.time()
     return None
@@ -428,17 +462,17 @@ def _fetch_normal_txs_moralis(addr, ts_start, ts_end):
 
 
 def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
-    """Fetch token transfers. 优先 Ankr → Moralis → BSCScan eth_getLogs。"""
-    # 先尝试 Ankr
-    results = _fetch_token_txs_ankr(addr, ts_start, ts_end, contract)
-    if results or _ankr_available:
-        return results
-    # Ankr 不可用，尝试 Moralis
+    """Fetch token transfers. 主通道 Moralis → 备用 Ankr → 兜底 eth_getLogs。"""
+    # 主通道：Moralis（2026-06-06 起，Ankr 持续故障已降级为备用）
     results = _fetch_token_txs_moralis(addr, ts_start, ts_end, contract)
     if results or _moralis_available:
         return results
-    # 都不可用，走 BSCScan eth_getLogs
-    return _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract)
+    # Moralis 不可用，尝试 Ankr
+    results = _fetch_token_txs_ankr(addr, ts_start, ts_end, contract)
+    if results or _ankr_available:
+        return results
+    # 都不可用，走公共 RPC eth_getLogs 兜底
+    return _fetch_token_txs_getlogs(addr, ts_start, ts_end, contract)
 
 
 def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
@@ -481,8 +515,8 @@ def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
     return results
 
 
-def _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract=None):
-    """通过 BSC RPC eth_getLogs 拉 token 转账（备用通道）"""
+def _fetch_token_txs_getlogs(addr, ts_start, ts_end, contract=None):
+    """通过公共 RPC eth_getLogs 拉 token 转账（兜底通道）"""
     from_block = _ts_to_block(ts_start)
     to_block = _ts_to_block(ts_end)
 
@@ -515,15 +549,15 @@ def _fetch_token_txs_bscscan(addr, ts_start, ts_end, contract=None):
 
 
 def _fetch_normal_txs(addr, ts_start, ts_end, api_keys=None):
-    """Fetch normal (BNB) transactions. 优先 Ankr → Moralis → 空（BNB gas 影响小）。"""
-    results = _fetch_normal_txs_ankr(addr, ts_start, ts_end)
-    if results or _ankr_available:
-        return results
-    # Ankr 不可用，尝试 Moralis
+    """Fetch normal (BNB) transactions. 主通道 Moralis → 备用 Ankr → 空（BNB gas 影响小）。"""
     results = _fetch_normal_txs_moralis(addr, ts_start, ts_end)
     if results or _moralis_available:
         return results
-    return _fetch_normal_txs_bscscan(addr, ts_start, ts_end)
+    # Moralis 不可用，尝试 Ankr
+    results = _fetch_normal_txs_ankr(addr, ts_start, ts_end)
+    if results or _ankr_available:
+        return results
+    return _fetch_normal_txs_empty(addr, ts_start, ts_end)
 
 
 def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
@@ -590,8 +624,8 @@ def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
     return results
 
 
-def _fetch_normal_txs_bscscan(addr, ts_start, ts_end):
-    """通过 BSC RPC 拉 BNB 交易（备用通道）- 简化版只统计 gas"""
+def _fetch_normal_txs_empty(addr, ts_start, ts_end):
+    """BNB 交易兜底通道 - 返回空（getLogs 拉不到普通转账，BNB gas 对磨损影响极小）"""
     # BNB 普通交易无法通过 getLogs 拉取（不是 event）
     # 但磨损计算主要依赖 token transfer，BNB gas 影响很小
     # 返回空列表，磨损计算中 gas 部分会缺失但不影响主要结果
@@ -741,11 +775,29 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
             # 顺序按 timestamp（同 hash 第一笔）排序，便于"首笔 swap 卖出"识别
             ordered_hashes = sorted(by_hash.keys(), key=lambda h: int(by_hash[h][0]['timeStamp']))
 
+            # 先轻量识别出本地址的 swap hash，并发预热供应商缓存（避免主循环串行拉 verbose）
+            swap_hashes = []
+            for h in ordered_hashes:
+                hi = ho = hqi = hqo = 0.0
+                for tx in by_hash[h]:
+                    val = float(tx['value']) / 1e18
+                    ca = tx['contractAddress'].lower()
+                    if tx['to'].lower() == a_lower:
+                        if ca == USDT: hi += val
+                        elif ca == QUQ: hqi += val
+                    elif tx['from'].lower() == a_lower:
+                        if ca == USDT: ho += val
+                        elif ca == QUQ: hqo += val
+                if (hi > 0 or ho > 0) and (hqi > 0 or hqo > 0):
+                    swap_hashes.append(h)
+            prewarm_vendor_cache(swap_hashes)
+
             swap_ui = swap_uo = 0.0          # swap 内的 USDT 收/付
             relay_qout = 0.0                 # 转给 TEAM_RELAY 的 QUQ
             principal_usd = 0.0              # 本金注入折U
             principal_n = 0
             first_sell_swap_ui = 0.0         # 首笔卖 QUQ 的 swap 内 ui
+            v_lifi = v_lm = v_pancake = v_other = 0  # 供应商逐笔计数
 
             for h in ordered_hashes:
                 items = by_hash[h]
@@ -777,6 +829,16 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                     swap_uo += uo
                     if qo > 0 and ui > 0 and first_sell_swap_ui == 0.0:
                         first_sell_swap_ui = ui
+                    # 供应商分类：按交易内部 verbose log 命中的聚合器归类
+                    vendor = classify_swap_vendor(h)
+                    if vendor == 'LiFi':
+                        v_lifi += 1
+                    elif vendor == 'Liquidmesh':
+                        v_lm += 1
+                    elif vendor == 'Pancake':
+                        v_pancake += 1
+                    else:
+                        v_other += 1
                 else:
                     relay_qout += relay_q_in_hash
                     # 本金注入识别
@@ -827,6 +889,10 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                 'bnb_tx_count': bnb_tx_count,
                 'bnb_gas_used': bnb_gas_used,
                 'quq_price': quq_price,
+                'v_lifi': v_lifi,
+                'v_liquidmesh': v_lm,
+                'v_pancake': v_pancake,
+                'v_other': v_other,
             }
         except Exception:
             pass
@@ -837,6 +903,7 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
         'principal_n': 0, 'principal_skipped': False, 'relay_qout': 0,
         'quq_sell_stripped': 0, 'wear': 0, 'points': 0,
         'bnb_tx_count': 0, 'bnb_gas_used': 0, 'quq_price': quq_price,
+        'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0,
     }
 
 
@@ -923,6 +990,7 @@ def scan_batch(addresses, ts_start, ts_end, include_balances=False, algo='u',
                     'fullAddr': addresses[idx],
                     'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0,
                     'bnb_tx_count': 0, 'bnb_gas_used': 0,
+                    'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0,
                 }
             done_count += 1
             if progress_cb:

@@ -33,26 +33,6 @@ def _probe_ankr_on_startup():
             _scanner_mod._ankr_fail_ts = time.time()
     threading.Thread(target=_probe, daemon=True).start()
 
-# --- 备注存储 ---
-NOTES_FILE = os.path.join(os.path.dirname(__file__), 'data', 'address-notes.json')
-_notes_lock = threading.Lock()
-
-def _load_notes() -> dict:
-    """加载地址备注，返回 {address_lower: note_text}"""
-    if not os.path.exists(NOTES_FILE):
-        return {}
-    try:
-        with open(NOTES_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return {}
-
-def _save_notes(notes: dict):
-    """保存地址备注"""
-    os.makedirs(os.path.dirname(NOTES_FILE), exist_ok=True)
-    with open(NOTES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(notes, f, ensure_ascii=False, indent=2)
-
 # --- Config ---
 # Ankr API - no API keys needed, URL configured in scanner.py
 MAX_ADDRESSES = 1000
@@ -260,35 +240,6 @@ def get_balance(address: str):
     if not re.fullmatch(r'0x[a-fA-F0-9]{40}', address):
         raise HTTPException(400, "无效地址")
     return query_balances(address)
-
-
-# --- 备注 API ---
-class NoteRequest(BaseModel):
-    address: str
-    note: str
-
-
-@app.get("/api/notes")
-def get_notes():
-    """获取所有地址备注"""
-    with _notes_lock:
-        return _load_notes()
-
-
-@app.post("/api/notes")
-def save_note(req: NoteRequest):
-    """保存单个地址备注"""
-    addr = req.address.strip().lower()
-    if not re.fullmatch(r'0x[a-fa-f0-9]{40}', addr):
-        raise HTTPException(400, "无效地址")
-    with _notes_lock:
-        notes = _load_notes()
-        if req.note.strip():
-            notes[addr] = req.note.strip()
-        else:
-            notes.pop(addr, None)  # 空备注=删除
-        _save_notes(notes)
-    return {"ok": True}
 
 
 # Serve static frontend
