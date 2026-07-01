@@ -35,8 +35,8 @@ def _probe_ankr_on_startup():
 
 # --- Config ---
 # Ankr API - no API keys needed, URL configured in scanner.py
-MAX_ADDRESSES = 1000
-MAX_CONCURRENT_TASKS = 5
+MAX_ADDRESSES = int(os.environ.get("MAX_ADDRESSES", "1000"))
+MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", "5"))
 
 # --- Task store ---
 tasks: dict = {}  # task_id -> {status, progress, total, results, error, created}
@@ -106,9 +106,7 @@ def diag_ankr():
     results = {}
     # 状态
     results["ankr_available"] = _sc._ankr_available
-    results["moralis_available"] = _sc._moralis_available
     results["ankr_fail_ts"] = _sc._ankr_fail_ts
-    results["moralis_fail_ts"] = _sc._moralis_fail_ts
     # 测试 Ankr getTokenTransfers
     t0 = _t.time()
     try:
@@ -117,14 +115,6 @@ def diag_ankr():
         results["ankr_getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "ok": "result" in data and bool(data["result"].get("transfers"))}
     except Exception as e:
         results["ankr_getTokenTransfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
-    # 测试 Moralis
-    t0 = _t.time()
-    try:
-        headers = {'accept': 'application/json', 'X-API-Key': _sc.MORALIS_API_KEY}
-        r = _req.get(f'{_sc.MORALIS_BASE}/0xCD0D720cAB1B92fDbaf1470C51C3958bd92e151A/erc20/transfers', headers=headers, params={'chain':'bsc','limit':3}, timeout=20)
-        results["moralis_transfers"] = {"ms": int((_t.time()-t0)*1000), "status": r.status_code, "count": len(r.json().get("result",[])) if r.status_code==200 else 0}
-    except Exception as e:
-        results["moralis_transfers"] = {"ms": int((_t.time()-t0)*1000), "error": str(e)}
     # 测试 BSC RPC eth_getLogs
     t0 = _t.time()
     try:

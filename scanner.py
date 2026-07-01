@@ -33,6 +33,8 @@ PANCAKE_POOLS  = {
     '0x28e2ea090877bf75740558f6bfb36a5ffee9e9df',  # PancakeInfinity PoolManager（底层成交）
 }
 _VENDOR_CACHE = {}  # txhash -> 'LiFi' | 'Liquidmesh' | 'Pancake' | None
+VENDOR_CLASSIFY = os.environ.get('QUQ_CLASSIFY_VENDORS', '0') == '1'
+VENDOR_WORKERS = max(1, int(os.environ.get('QUQ_VENDOR_WORKERS', '2')))
 
 
 def classify_swap_vendor(txhash):
@@ -40,6 +42,8 @@ def classify_swap_vendor(txhash):
     返回 'LiFi' / 'Liquidmesh' / 'Pancake' / None（未命中已知聚合器）。结果按 hash 缓存。
     """
     h = txhash.lower()
+    if not VENDOR_CLASSIFY:
+        return None
     if h in _VENDOR_CACHE:
         return _VENDOR_CACHE[h]
     addrs = _receipt_log_addresses(h)
@@ -60,6 +64,9 @@ def prewarm_vendor_cache(hashes, workers=10):
     主循环随后调用 classify_swap_vendor 时全部命中缓存，避免串行慢。
     _VENDOR_CACHE 单 key 赋值在 GIL 下线程安全。
     """
+    if not VENDOR_CLASSIFY:
+        return
+    workers = min(workers, VENDOR_WORKERS)
     todo = [h.lower() for h in hashes if h.lower() not in _VENDOR_CACHE]
     if not todo:
         return
@@ -835,8 +842,9 @@ def query_balances(addr):
 
 
 # --- 并发批量扫描 ---
-# 每批最多 8 个地址并发（Ankr 免费 tier 限速约 30 req/s，每地址 3 请求 = 8×3=24 req 安全）
-BATCH_CONCURRENCY = 15
+# 每批地址并发。以前写成 15，叠加 5 个任务 + receipt 路由分类时会把 RPC/代理打满。
+# 默认 8；如 Railway 资源足够可用 BATCH_CONCURRENCY 环境变量调整。
+BATCH_CONCURRENCY = max(1, int(os.environ.get('BATCH_CONCURRENCY', '8')))
 
 
 def _scan_one(addr, ts_start, ts_end, include_balances=False, algo='u'):
