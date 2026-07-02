@@ -30,6 +30,8 @@ textarea::placeholder{color:var(--dim)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hint{color:var(--dim);font-size:12px;margin-top:12px;line-height:1.7}
 .hint b{color:var(--muted);font-weight:600}
+.queue-status{margin-top:12px;color:#93c5fd;font-size:12px;background:rgba(15,23,42,.65);border:1px solid var(--border);border-radius:10px;padding:9px 11px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.queue-status .warn{color:#facc15}.queue-status .bad{color:#f87171}.queue-status .ok{color:#4ade80}
 .cb-label{color:var(--muted);font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 .cb-label input{accent-color:var(--blue);width:15px;height:15px}
 
@@ -37,6 +39,9 @@ textarea::placeholder{color:var(--dim)}
 .progress-bar-outer{width:100%;height:22px;background:rgba(10,13,20,.7);border-radius:12px;overflow:hidden;margin:12px 0;border:1px solid var(--border)}
 .progress-bar-inner{height:100%;background:linear-gradient(90deg,#3b82f6,#22c55e);border-radius:12px;transition:width .3s;min-width:0;box-shadow:0 0 14px rgba(34,197,94,.4)}
 .progress-text{color:var(--muted);font-size:13px;text-align:center}
+.task-meta{color:#93c5fd;font-size:12px;text-align:center;margin-top:8px}
+.btn-cancel{margin-top:12px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.45);color:#fecaca}
+.btn-cancel:hover{background:rgba(239,68,68,.25);color:#fff}
 
 .stat-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:14px;margin-bottom:22px}
 .stat-card{position:relative;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border);border-radius:14px;padding:16px 18px;overflow:hidden;transition:transform .15s,border-color .15s}
@@ -87,12 +92,15 @@ tbody tr:last-child td{border-bottom:none}
     <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 全部刷新余额</button>
   </div>
   <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · <b>U 算法</b>=USDT 返现旧逻辑（含非QUQ rebate）· <b>QUQ 算法</b>=v6 真实磨损（仅 swap，扣本金注入，剥离首笔卖空领）· 每行地址有单独🔄刷新按钮</div>
+  <div class="queue-status" id="taskStats">任务槽：读取中...</div>
 </div>
 
 <div class="progress-section" id="progressSection">
   <div style="color:#fff;font-size:15px;font-weight:600" id="progressTitle">扫描中...</div>
   <div class="progress-bar-outer"><div class="progress-bar-inner" id="progressBar"></div></div>
   <div class="progress-text" id="progressText">0 / 0</div>
+  <div class="task-meta" id="taskMeta"></div>
+  <div style="text-align:center"><button class="btn btn-cancel" id="cancelTaskBtn" onclick="cancelCurrentTask()">停止当前任务并释放槽位</button></div>
 </div>
 
 <div class="error-msg" id="errorMsg"></div>
@@ -136,6 +144,19 @@ let allResults = [], taskId = null, hasBal = false, balOnly = false, bnbPrice = 
 
 // 加载 BNB 价格
 fetch('/api/bnb-price').then(r=>r.json()).then(d=>{bnbPrice=d.price||600}).catch(()=>{});
+
+async function refreshTaskStats(){
+  try{
+    const res=await fetch('/api/tasks');
+    const s=await res.json();
+    const active=s.active_slots||0,max=s.max_concurrent_tasks||5,avail=s.available_slots||0;
+    const cls=active>=max?'bad':active>=Math.max(1,max-1)?'warn':'ok';
+    const running=(s.tasks||[]).filter(t=>t.status==='running').slice(0,3)
+      .map(t=>`${t.task_id}:${t.progress}/${t.total},闲${t.idle_seconds||0}s`).join(' ｜ ');
+    taskStats.innerHTML=`<span class="${cls}">任务槽 ${active}/${max}，可用 ${avail}</span><span>卡死无进度 ${s.task_stale_seconds||300}s 自动释放</span>${running?`<span>运行中：${running}</span>`:''}`;
+  }catch(e){taskStats.textContent='任务槽：读取失败'}
+}
+refreshTaskStats();setInterval(refreshTaskStats,5000);
 
 function money(v){return '$'+Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
 function signedMoney(v){const n=Number(v||0);return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
@@ -193,8 +214,11 @@ async function startScan(algo){
     progressBar.style.width='0%';
     progressTitle.textContent=(algo==='quq'?'QUQ 算法 ':'U 算法 ')+'扫描中...';
     progressText.textContent=`0 / ${data.total}`;
+    taskMeta.textContent=`任务 ${taskId} ｜ 运行槽 ${data.active_slots||0}/${data.max_concurrent_tasks||5}`;
+    cancelTaskBtn.disabled=false;
+    refreshTaskStats();
     pollStatus();
-  }catch(e){errorMsg.textContent=String(e);setScanBtnDisabled(false)}
+  }catch(e){errorMsg.textContent=String(e);setScanBtnDisabled(false);refreshTaskStats()}
 }
 
 async function refreshBalances(){
@@ -219,6 +243,21 @@ async function refreshBalances(){
   setScanBtnDisabled(false);
 }
 
+async function cancelCurrentTask(){
+  if(!taskId)return;
+  cancelTaskBtn.disabled=true;
+  try{
+    const res=await fetch(`/api/cancel/${taskId}`,{method:'POST'});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.detail||'取消失败');
+    errorMsg.textContent='已停止当前任务，槽位已释放';
+    progressTitle.textContent='已取消';
+    progressSection.style.display='none';
+    setScanBtnDisabled(false);
+    refreshTaskStats();
+  }catch(e){errorMsg.textContent=String(e);cancelTaskBtn.disabled=false}
+}
+
 async function pollStatus(){
   if(!taskId)return;
   try{
@@ -227,11 +266,13 @@ async function pollStatus(){
     const pct=s.total?Math.round(s.progress/s.total*100):0;
     progressBar.style.width=pct+'%';
     progressText.textContent=`${s.progress} / ${s.total}`;
-    progressTitle.textContent=s.status==='running'?'扫描中...':s.status==='queued'?'排队中...':'完成';
+    taskMeta.textContent=`任务 ${taskId} ｜ 运行槽 ${s.active_slots||0}/${s.max_concurrent_tasks||5} ｜ 已跑 ${s.running_seconds||0}s ｜ 闲置 ${s.idle_seconds||0}s`;
+    progressTitle.textContent=s.status==='running'?'扫描中...':s.status==='queued'?'排队中...':s.status==='timeout'?'已超时释放':s.status==='cancelled'?'已取消':'完成';
+    refreshTaskStats();
     if(s.status==='done'){
       await loadResults();setScanBtnDisabled(false);return;
     }
-    if(s.status==='error'){
+    if(['error','timeout','cancelled'].includes(s.status)){
       errorMsg.textContent=s.error||'扫描失败';setScanBtnDisabled(false);progressSection.style.display='none';return;
     }
   }catch(e){}

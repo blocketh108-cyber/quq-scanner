@@ -2,7 +2,7 @@
 Migrated from Etherscan V2 to Ankr Advanced API (2026-04-20)."""
 import math, time, random, os
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import requests as req
 
 utc8 = timezone(timedelta(hours=8))
@@ -862,33 +862,57 @@ def _scan_one(addr, ts_start, ts_end, include_balances=False, algo='u'):
 
 
 def scan_batch(addresses, ts_start, ts_end, include_balances=False, algo='u',
-               progress_cb=None, concurrency=BATCH_CONCURRENCY):
+               progress_cb=None, concurrency=BATCH_CONCURRENCY, cancel_cb=None):
     """并发扫描多个地址，返回按原始顺序排列的结果列表。
-    progress_cb(done_count) 每完成一个地址回调一次。"""
-    results = [None] * len(addresses)
+    progress_cb(done_count) 每完成一个地址回调一次。
+    cancel_cb() 返回 True 时停止等待剩余地址，并尽量取消未开始的 future。
+    """
+    results: list = [None] * len(addresses)
     done_count = 0
+    pool = ThreadPoolExecutor(max_workers=concurrency)
+    pending = set()
+    future_to_idx = {}
+    cancelled = False
 
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        future_to_idx = {}
+    try:
         for i, addr in enumerate(addresses):
             f = pool.submit(_scan_one, addr, ts_start, ts_end, include_balances, algo)
             future_to_idx[f] = i
+            pending.add(f)
 
-        for f in as_completed(future_to_idx):
-            idx = future_to_idx[f]
-            try:
-                results[idx] = f.result()
-            except Exception:
-                # 失败时返回空结果
-                results[idx] = {
-                    'addr': addresses[idx].lower(),
-                    'fullAddr': addresses[idx],
-                    'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0,
-                    'bnb_tx_count': 0, 'bnb_gas_used': 0,
-                    'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0,
-                }
-            done_count += 1
-            if progress_cb:
-                progress_cb(done_count)
+        while pending:
+            if cancel_cb and cancel_cb():
+                cancelled = True
+                break
 
+            done, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+            if not done:
+                continue
+
+            for f in done:
+                idx = future_to_idx[f]
+                try:
+                    results[idx] = f.result()
+                except Exception:
+                    # 失败时返回空结果
+                    results[idx] = {
+                        'addr': addresses[idx].lower(),
+                        'fullAddr': addresses[idx],
+                        'usdt_in': 0, 'usdt_out': 0, 'wear': 0, 'points': 0,
+                        'bnb_tx_count': 0, 'bnb_gas_used': 0,
+                        'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0,
+                    }
+                done_count += 1
+                if progress_cb:
+                    progress_cb(done_count)
+    finally:
+        if cancelled or (cancel_cb and cancel_cb()):
+            for f in pending:
+                f.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+        else:
+            pool.shutdown(wait=True)
+
+    if cancelled:
+        raise RuntimeError('扫描已取消或超时')
     return results
