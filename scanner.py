@@ -13,8 +13,9 @@ USD1 = '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d'
 QUQ  = '0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf'
 BNB_PLACEHOLDER = 'BNB'
 
-ANKR_URL = os.environ.get('ANKR_URL', 'https://rpc.ankr.com/multichain/363197ae9fdac895e127b44fbce5c17e0ea17c7d71ae64ba6f58384db63e5167')
-BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed.bnbchain.org')
+# 有效凭据只允许由部署环境注入，禁止写入公开仓库。
+ANKR_URL = os.environ.get('ANKR_URL', '').strip()
+BSC_RPC = os.environ.get('BSC_RPC', 'https://bsc-dataseed.bnbchain.org').strip()
 DEX_ADDYS = {
     '0xb300000b72deaeb607a12d5f54773d1c19c7028d',
     '0xe1acb466421ed24dd8bd381d1205bad0ad43ca9c',
@@ -288,6 +289,10 @@ _ankr_fail_ts = 0  # 上次标记不可用的时间
 def _ankr_post(method, params, retries=2):
     """Call Ankr Advanced API with retries. 失败快速返回以便 fallback。"""
     global _ankr_available, _ankr_fail_ts
+    if not ANKR_URL:
+        _ankr_available = False
+        _ankr_fail_ts = time.time()
+        return {}
     # 每 5 分钟重试一次 Ankr
     if not _ankr_available and time.time() - _ankr_fail_ts > 300:
         _ankr_available = True
