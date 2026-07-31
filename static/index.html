@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>QUQ Alpha 扫描器</title><style>
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>QQQB/USDT 扫描器</title><style>
 :root{
   --bg:#0a0d14;--card:#141925;--card2:#1a2030;--border:#232c3d;--border2:#303d54;
   --txt:#e6eaf2;--muted:#8893a7;--dim:#566074;
@@ -77,8 +77,8 @@ tbody tr:last-child td{border-bottom:none}
 .zero{color:var(--dim)}
 .error-msg{color:#f87171;margin-top:12px;font-size:14px}
 </style></head><body>
-<h1>🦞 QUQ Alpha 扫描器</h1>
-<div class="subtitle">粘贴 BSC 地址，扫描当天 QUQ 交易磨损数据</div>
+<h1>🦞 QQQB/USDT 扫描器</h1>
+<div class="subtitle">粘贴 BSC 地址，扫描当天 QQQB/USDT 交易数据</div>
 
 <div class="input-section">
   <label>地址列表（每行一个，最多 1000 个）</label>
@@ -88,10 +88,10 @@ tbody tr:last-child td{border-bottom:none}
     <input type="date" id="dayInput">
     <label class="cb-label"><input type="checkbox" id="balCheck" checked> 同时查余额</label>
     <button class="btn btn-primary" id="scanBtnU" onclick="startScan('u')">🔍 U 算法扫描</button>
-    <button class="btn btn-quq" id="scanBtnQuq" onclick="startScan('quq')">🦞 QUQ 算法扫描</button>
+    <button class="btn btn-quq" id="scanBtnQqqb" onclick="startScan('qqqb')">🦞 QQQB 算法扫描</button>
     <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 全部刷新余额</button>
   </div>
-  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · <b>U 算法</b>=USDT 返现旧逻辑（含非QUQ rebate）· <b>QUQ 算法</b>=v6 真实磨损（仅 swap，扣本金注入，剥离首笔卖空领）· 每行地址有单独🔄刷新按钮</div>
+  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 7月25日及以前查 QUQ，7月26日起只查 QQQB · <b>U 算法</b>=含返现修正 · <b>QQQB 算法</b>=真实 swap 磨损 · 每行地址可单独刷新余额</div>
   <div class="queue-status" id="taskStats">任务槽：读取中...</div>
 </div>
 
@@ -110,6 +110,7 @@ tbody tr:last-child td{border-bottom:none}
     <div class="stat-card"><div class="label">活跃地址</div><div class="value" id="statActive">-</div></div>
     <div class="stat-card"><div class="label">总买入</div><div class="value green" id="statBuy">-</div></div>
     <div class="stat-card"><div class="label">总卖出</div><div class="value" id="statSell">-</div></div>
+    <div class="stat-card"><div class="label">总交易量</div><div class="value green" id="statVolume">-</div></div>
     <div class="stat-card"><div class="label">USDT磨损</div><div class="value red" id="statWear">-</div></div>
     <div class="stat-card"><div class="label">BNB笔数</div><div class="value" id="statBnbTx" style="color:#f0b90b">-</div></div>
     <div class="stat-card"><div class="label">BNB消耗</div><div class="value" id="statBnbGas" style="color:#f0b90b">-</div></div>
@@ -179,7 +180,7 @@ async function refreshRow(addr, idx){
     const r = allResults.find(r=>(r.fullAddr||r.addr||'').toLowerCase()===addr.toLowerCase());
     if(r){
       r.usdt_bal = bal.usdt; r.usdc_bal = bal.usdc;
-      r.usd1_bal = bal.usd1; r.bnb_bal = bal.bnb;
+      r.usd1_bal = bal.usd1; r.qqqb_bal = bal.qqqb; r.bnb_bal = bal.bnb;
     }
     hasBal = true;
     updateStats(); renderTable();
@@ -192,7 +193,7 @@ async function refreshRow(addr, idx){
 }
 
 function setScanBtnDisabled(d){
-  const a=document.getElementById('scanBtnU'),b=document.getElementById('scanBtnQuq');
+  const a=document.getElementById('scanBtnU'),b=document.getElementById('scanBtnQqqb');
   if(a)a.disabled=d;if(b)b.disabled=d;refreshBtn.disabled=d;
 }
 let currentAlgo='u';
@@ -212,7 +213,7 @@ async function startScan(algo){
     progressSection.style.display='block';
     resultsSection.style.display='none';
     progressBar.style.width='0%';
-    progressTitle.textContent=(algo==='quq'?'QUQ 算法 ':'U 算法 ')+'扫描中...';
+    progressTitle.textContent=(algo==='qqqb'?'QQQB 算法 ':'U 算法 ')+'扫描中...';
     progressText.textContent=`0 / ${data.total}`;
     taskMeta.textContent=`任务 ${taskId} ｜ 运行槽 ${data.active_slots||0}/${data.max_concurrent_tasks||5}`;
     cancelTaskBtn.disabled=false;
@@ -292,14 +293,14 @@ async function loadResults(){
 function updateStats(){
   if(balOnly){
     statActive.textContent=allResults.length;
-    statBuy.textContent='-';statSell.textContent='-';statWear.textContent='-';
+    statBuy.textContent='-';statSell.textContent='-';statVolume.textContent='-';statWear.textContent='-';
     statBnbTx.textContent='-';statBnbGas.textContent='-';statBnbUsdt.textContent='-';statTotalWear.textContent='-';
   }else{
     let active=0,buy=0,sell=0,wear=0,bnbTx=0,bnbGas=0;
     allResults.forEach(r=>{if(r.points>0)active++;buy+=r.usdt_in||0;sell+=r.usdt_out||0;wear+=r.wear||0;bnbTx+=r.bnb_tx_count||0;bnbGas+=r.bnb_gas_used||0});
     const gasUsdt=bnbGas*bnbPrice;
     const totalWear=wear-gasUsdt;
-    statActive.textContent=active;statBuy.textContent=money(buy);statSell.textContent=money(sell);statWear.textContent=signedMoney(wear);
+    statActive.textContent=active;statBuy.textContent=money(buy);statSell.textContent=money(sell);statVolume.textContent=money(buy+sell);statWear.textContent=signedMoney(wear);
     statBnbTx.textContent=bnbTx.toLocaleString();
     statBnbGas.textContent=bnbGas.toFixed(6)+' BNB';
     statBnbUsdt.textContent=signedMoney(-gasUsdt);
@@ -317,7 +318,7 @@ function renderTable(){
   // Build header
   let hdr='<th>#</th><th>地址</th>';
   if(!balOnly) hdr+='<th>买入</th><th>卖出</th><th>磨损</th><th>BNB笔数</th><th>Gas(BNB)</th><th>Gas(U)</th><th>总磨损</th><th>积分</th><th>LiFi</th><th>Liquidmesh</th><th>Pancake</th>';
-  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>QUQ</th><th>BNB</th>';
+  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>QQQB</th><th>BNB</th>';
   if(balOnly) hdr+='<th>总余额</th>';
   hdr+='<th>操作</th>';
   tableHead.innerHTML=hdr;
@@ -342,7 +343,7 @@ function renderTable(){
     const usdt_b=r.usdt_bal!=null?r.usdt_bal:(r.usdt||0);
     const usdc_b=r.usdc_bal!=null?r.usdc_bal:(r.usdc||0);
     const usd1_b=r.usd1_bal!=null?r.usd1_bal:(r.usd1||0);
-    const quq_b=r.quq_bal!=null?r.quq_bal:(r.quq||0);
+    const qqqb_b=r.qqqb_bal!=null?r.qqqb_bal:(r.qqqb||0);
     const bnb_b=r.bnb_bal!=null?r.bnb_bal:(r.bnb||0);
     const hasBals=r.usdt_bal!=null||r.usdt!=null;
     const freshCls=hasBals?' fresh':'';
@@ -354,7 +355,7 @@ function renderTable(){
       html+=`<td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td>${r.bnb_tx_count||0}</td><td style="color:#f0b90b">${(r.bnb_gas_used||0).toFixed(6)}</td><td class="wear">${signedMoney(-gasUsdt)}</td><td class="wear" style="font-weight:bold">${signedMoney(totalWear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td><td>${r.v_lifi||0}</td><td>${r.v_liquidmesh||0}</td><td>${r.v_pancake||0}</td>`;
     }
     if(showBal){
-      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(quq_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
+      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(qqqb_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
     }
     if(balOnly){
       const total=usdt_b+usdc_b+usd1_b;

@@ -1,4 +1,4 @@
-"""FastAPI web service for QUQ Alpha public scanning."""
+"""FastAPI web service for QQQB/USDT public scanning."""
 import os, re, uuid, time, threading, json
 from datetime import datetime
 from typing import Optional
@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from scanner import trading_window, query_address, query_address_quq_v6, query_balances, _get_bnb_price, get_quq_price, scan_batch, ANKR_URL, _ankr_available
 import scanner as _scanner_mod
 
-app = FastAPI(title="QUQ Alpha Scanner")
+app = FastAPI(title="QQQB/USDT Scanner")
 
 
 @app.on_event("startup")
@@ -135,7 +135,7 @@ class ScanRequest(BaseModel):
     addresses: list[str]
     day: Optional[str] = None  # YYYY-MM-DD, default today
     include_balances: bool = False  # Also fetch balances
-    algo: Optional[str] = "u"  # "u" = USDT 返现算法（旧）, "quq" = QUQ v6 算法
+    algo: Optional[str] = "u"  # "u" = 返现算法；"qqqb" = 真实磨损算法（旧 quq 值兼容）
 
 
 class RefreshRequest(BaseModel):
@@ -235,7 +235,7 @@ def health():
         "keys_loaded": 0,
         "api": "ankr+rpc_fallback",
         "max_addresses": MAX_ADDRESSES,
-        "version": "2.2-task-watchdog",
+        "version": "2.3-qqqb-switch",
         "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
         "task_stale_seconds": TASK_STALE_SECONDS,
         "task_max_seconds": TASK_MAX_SECONDS,
@@ -307,8 +307,10 @@ def start_scan(req: ScanRequest):
         raise HTTPException(400, f"最多支持 {MAX_ADDRESSES} 个地址")
 
     algo = (req.algo or 'u').lower()
-    if algo not in ('u', 'quq'):
-        raise HTTPException(400, "algo 必须为 'u' 或 'quq'")
+    if algo == 'quq':
+        algo = 'qqqb'
+    if algo not in ('u', 'qqqb'):
+        raise HTTPException(400, "algo 必须为 'u' 或 'qqqb'")
     task_id = uuid.uuid4().hex[:12]
     tasks[task_id] = {
         'status': 'queued',
