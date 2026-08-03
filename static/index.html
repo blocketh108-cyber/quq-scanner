@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>QQQB/USDT 扫描器</title><style>
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>QUQ + QQQB/USDT 扫描器</title><style>
 :root{
   --bg:#0a0d14;--card:#141925;--card2:#1a2030;--border:#232c3d;--border2:#303d54;
   --txt:#e6eaf2;--muted:#8893a7;--dim:#566074;
@@ -77,8 +77,8 @@ tbody tr:last-child td{border-bottom:none}
 .zero{color:var(--dim)}
 .error-msg{color:#f87171;margin-top:12px;font-size:14px}
 </style></head><body>
-<h1>🦞 QQQB/USDT 扫描器</h1>
-<div class="subtitle">粘贴 BSC 地址，扫描当天 QQQB/USDT 交易数据</div>
+<h1>🦞 QUQ + QQQB/USDT 扫描器</h1>
+<div class="subtitle">粘贴 BSC 地址，同时扫描当天 QUQ、QQQB 与 USDT 的交易数据</div>
 
 <div class="input-section">
   <label>地址列表（每行一个，最多 1000 个）</label>
@@ -88,10 +88,10 @@ tbody tr:last-child td{border-bottom:none}
     <input type="date" id="dayInput">
     <label class="cb-label"><input type="checkbox" id="balCheck" checked> 同时查余额</label>
     <button class="btn btn-primary" id="scanBtnU" onclick="startScan('u')">🔍 U 算法扫描</button>
-    <button class="btn btn-quq" id="scanBtnQqqb" onclick="startScan('qqqb')">🦞 QQQB 算法扫描</button>
+    <button class="btn btn-quq" id="scanBtnQqqb" onclick="startScan('qqqb')">🦞 双币真实磨损扫描</button>
     <button class="btn btn-secondary" id="refreshBtn" onclick="refreshBalances()">💰 全部刷新余额</button>
   </div>
-  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 7月25日及以前查 QUQ，7月26日起只查 QQQB · <b>U 算法</b>=含返现修正 · <b>QQQB 算法</b>=真实 swap 磨损 · 每行地址可单独刷新余额</div>
+  <div class="hint">交易日窗口：选择日期的 08:00 → 次日 08:00（UTC+8） · 每天同时查 QUQ + QQQB，两种币统一汇总且同哈希不重复 · <b>U 算法</b>=含返现修正 · <b>双币真实磨损</b>=真实 swap 磨损 · 每行地址可单独刷新余额</div>
   <div class="queue-status" id="taskStats">任务槽：读取中...</div>
 </div>
 
@@ -161,7 +161,13 @@ refreshTaskStats();setInterval(refreshTaskStats,5000);
 
 function money(v){return '$'+Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
 function signedMoney(v){const n=Number(v||0);return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
-function fmtBal(v){return Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}
+function fmtBal(v){
+  if(v===null||v===undefined)return '数据不可用';
+  return Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4});
+}
+function pickBal(r,fresh,legacy){
+  return Object.prototype.hasOwnProperty.call(r,fresh)?r[fresh]:(Object.prototype.hasOwnProperty.call(r,legacy)?r[legacy]:0);
+}
 
 function getAddresses(){
   return addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean);
@@ -180,7 +186,8 @@ async function refreshRow(addr, idx){
     const r = allResults.find(r=>(r.fullAddr||r.addr||'').toLowerCase()===addr.toLowerCase());
     if(r){
       r.usdt_bal = bal.usdt; r.usdc_bal = bal.usdc;
-      r.usd1_bal = bal.usd1; r.qqqb_bal = bal.qqqb; r.bnb_bal = bal.bnb;
+      r.usd1_bal = bal.usd1; r.quq_bal = bal.quq; r.qqqb_bal = bal.qqqb; r.bnb_bal = bal.bnb;
+      r.balance_error = bal.balance_error||null;
     }
     hasBal = true;
     updateStats(); renderTable();
@@ -213,7 +220,7 @@ async function startScan(algo){
     progressSection.style.display='block';
     resultsSection.style.display='none';
     progressBar.style.width='0%';
-    progressTitle.textContent=(algo==='qqqb'?'QQQB 算法 ':'U 算法 ')+'扫描中...';
+    progressTitle.textContent=(algo==='qqqb'?'双币真实磨损 ':'U 算法 ')+'扫描中...';
     progressText.textContent=`0 / ${data.total}`;
     taskMeta.textContent=`任务 ${taskId} ｜ 运行槽 ${data.active_slots||0}/${data.max_concurrent_tasks||5}`;
     cancelTaskBtn.disabled=false;
@@ -307,9 +314,13 @@ function updateStats(){
     statTotalWear.textContent=signedMoney(totalWear);
   }
   if(hasBal||balOnly){
-    let totalBal=0;
-    allResults.forEach(r=>{totalBal+=(r.usdt_bal||r.usdt||0)+(r.usdc_bal||r.usdc||0)+(r.usd1_bal||r.usd1||0)});
-    balCard.style.display='';statBal.textContent=money(totalBal);
+    let totalBal=0,balanceIncomplete=false;
+    allResults.forEach(r=>{
+      const vals=[pickBal(r,'usdt_bal','usdt'),pickBal(r,'usdc_bal','usdc'),pickBal(r,'usd1_bal','usd1')];
+      if(vals.some(v=>v===null||v===undefined))balanceIncomplete=true;
+      totalBal+=vals.reduce((sum,v)=>sum+(v==null?0:Number(v)),0);
+    });
+    balCard.style.display='';statBal.textContent=(balanceIncomplete?'部分数据：':'')+money(totalBal);
   }else{balCard.style.display='none'}
 }
 
@@ -318,7 +329,7 @@ function renderTable(){
   // Build header
   let hdr='<th>#</th><th>地址</th>';
   if(!balOnly) hdr+='<th>买入</th><th>卖出</th><th>磨损</th><th>BNB笔数</th><th>Gas(BNB)</th><th>Gas(U)</th><th>总磨损</th><th>积分</th><th>LiFi</th><th>Liquidmesh</th><th>Pancake</th>';
-  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>QQQB</th><th>BNB</th>';
+  if(showBal) hdr+='<th>USDT</th><th>USDC</th><th>USD1</th><th>QUQ</th><th>QQQB</th><th>BNB</th>';
   if(balOnly) hdr+='<th>总余额</th>';
   hdr+='<th>操作</th>';
   tableHead.innerHTML=hdr;
@@ -340,12 +351,13 @@ function renderTable(){
   rows.forEach((r,i)=>{
     const tr=document.createElement('tr');
     const addr=r.fullAddr||r.addr;
-    const usdt_b=r.usdt_bal!=null?r.usdt_bal:(r.usdt||0);
-    const usdc_b=r.usdc_bal!=null?r.usdc_bal:(r.usdc||0);
-    const usd1_b=r.usd1_bal!=null?r.usd1_bal:(r.usd1||0);
-    const qqqb_b=r.qqqb_bal!=null?r.qqqb_bal:(r.qqqb||0);
-    const bnb_b=r.bnb_bal!=null?r.bnb_bal:(r.bnb||0);
-    const hasBals=r.usdt_bal!=null||r.usdt!=null;
+    const usdt_b=pickBal(r,'usdt_bal','usdt');
+    const usdc_b=pickBal(r,'usdc_bal','usdc');
+    const usd1_b=pickBal(r,'usd1_bal','usd1');
+    const quq_b=pickBal(r,'quq_bal','quq');
+    const qqqb_b=pickBal(r,'qqqb_bal','qqqb');
+    const bnb_b=pickBal(r,'bnb_bal','bnb');
+    const hasBals=Object.prototype.hasOwnProperty.call(r,'usdt_bal')||r.usdt!==undefined;
     const freshCls=hasBals?' fresh':'';
 
     let html=`<td>${i+1}</td><td class="addr">${addr}</td>`;
@@ -355,11 +367,12 @@ function renderTable(){
       html+=`<td class="usdt">${money(r.usdt_in)}</td><td class="usdt">${money(r.usdt_out)}</td><td class="wear">${signedMoney(r.wear)}</td><td>${r.bnb_tx_count||0}</td><td style="color:#f0b90b">${(r.bnb_gas_used||0).toFixed(6)}</td><td class="wear">${signedMoney(-gasUsdt)}</td><td class="wear" style="font-weight:bold">${signedMoney(totalWear)}</td><td><span class="${r.points>0?'high':'zero'}">${r.points}</span></td><td>${r.v_lifi||0}</td><td>${r.v_liquidmesh||0}</td><td>${r.v_pancake||0}</td>`;
     }
     if(showBal){
-      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(qqqb_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
+      html+=`<td class="bal${freshCls}">${fmtBal(usdt_b)}</td><td class="bal${freshCls}">${fmtBal(usdc_b)}</td><td class="bal${freshCls}">${fmtBal(usd1_b)}</td><td class="bal${freshCls}">${fmtBal(quq_b)}</td><td class="bal${freshCls}">${fmtBal(qqqb_b)}</td><td class="bal${freshCls}">${fmtBal(bnb_b)}</td>`;
     }
     if(balOnly){
-      const total=usdt_b+usdc_b+usd1_b;
-      html+=`<td class="usdt">${money(total)}</td>`;
+      const stable=[usdt_b,usdc_b,usd1_b];
+      const total=stable.reduce((sum,v)=>sum+(v==null?0:Number(v)),0);
+      html+=`<td class="usdt">${stable.some(v=>v==null)?'数据不完整':money(total)}</td>`;
     }
     html+=`<td><button class="btn-mini" id="rb-${r._idx}" onclick="refreshRow('${addr}',${r._idx})">🔄</button></td>`;
     tr.innerHTML=html;

@@ -26,14 +26,16 @@ class MainQqqbTests(unittest.TestCase):
         self.assertEqual(main.tasks[response['task_id']]['algo'], 'qqqb')
 
     def test_健康接口版本已更新(self):
-        self.assertEqual(main.health()['version'], '2.3-qqqb-switch')
+        self.assertEqual(main.health()['version'], '2.4-dual-token')
 
-    def test_前端统一展示QQQB并包含总交易量(self):
+    def test_前端展示QUQ加QQQB并包含总交易量(self):
         html = (ROOT / 'static' / 'index.html').read_text(encoding='utf-8')
-        self.assertIn('QQQB/USDT 扫描器', html)
+        self.assertIn('QUQ + QQQB/USDT 扫描器', html)
         self.assertIn("startScan('qqqb')", html)
         self.assertIn('id="statVolume"', html)
-        self.assertIn('<th>QQQB</th>', html)
+        self.assertIn('<th>QUQ</th><th>QQQB</th>', html)
+        self.assertIn("Object.prototype.hasOwnProperty.call(r,legacy)?r[legacy]:0", html)
+        self.assertNotIn('r[legacy]??0', html)
         self.assertNotIn('QUQ Alpha 扫描器', html)
         self.assertNotIn('scanBtnQuq', html)
 

@@ -12,7 +12,7 @@ USDC = '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d'
 USD1 = '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d'
 QUQ  = '0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf'
 QQQB = '0x205812cdbed920aff76c6580abd681a46d11efc7'
-QQQB_SWITCH_DAY = '2026-07-26'
+TRADED_TOKENS = {'quq': QUQ, 'qqqb': QQQB}
 BNB_PLACEHOLDER = 'BNB'
 
 # 有效凭据只允许由部署环境注入，禁止写入公开仓库。
@@ -127,12 +127,9 @@ def trading_window(day_text=None):
     return d, int(start.timestamp()), int(now.timestamp())
 
 
-def traded_token_for_window(ts_start):
-    """按交易日选择唯一交易币种：7月26日起只查 QQQB，之前只查 QUQ。"""
-    day_text = datetime.fromtimestamp(ts_start, utc8).strftime('%Y-%m-%d')
-    if day_text >= QQQB_SWITCH_DAY:
-        return 'qqqb', QQQB
-    return 'quq', QUQ
+def traded_tokens_for_window(ts_start):
+    """所有交易日都同时扫描 QUQ 与 QQQB；两种币可能在同一窗口并存。"""
+    return dict(TRADED_TOKENS)
 
 
 # Transfer(address,address,uint256) event topic
@@ -241,17 +238,20 @@ def _rpc_get_logs(contract, from_block, to_block, addr_topic, topic_position='to
                     if 'error' in data:
                         continue
                     logs = data.get('result', [])
-                    return logs if isinstance(logs, list) else []
+                    if isinstance(logs, list):
+                        return logs
                 except Exception:
                     continue
             time.sleep(0.8 * (attempt + 1))
-        return []
+        return None
 
-    # 并发 10 路
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = [pool.submit(fetch_chunk, c) for c in chunks]
-        for f in as_completed(futures):
-            all_logs.extend(f.result())
+    with ThreadPoolExecutor(max_workers=min(10, len(chunks))) as pool:
+        futures = [pool.submit(fetch_chunk, chunk_range) for chunk_range in chunks]
+        for future in as_completed(futures):
+            chunk_logs = future.result()
+            if chunk_logs is None:
+                raise RuntimeError('BSC RPC 日志分段连续失败')
+            all_logs.extend(chunk_logs)
 
     return all_logs
 
@@ -297,37 +297,42 @@ _ankr_fail_ts = 0  # 上次标记不可用的时间
 
 
 def _ankr_post(method, params, retries=2):
-    """Call Ankr Advanced API with retries. 失败快速返回以便 fallback。"""
+    """调用 Ankr Advanced API；失败必须抛出，调用方决定是否完整回退。"""
     global _ankr_available, _ankr_fail_ts
     if not ANKR_URL:
         _ankr_available = False
         _ankr_fail_ts = time.time()
-        return {}
+        raise RuntimeError('Ankr端点未配置')
     # 每 5 分钟重试一次 Ankr
     if not _ankr_available and time.time() - _ankr_fail_ts > 300:
         _ankr_available = True
     if not _ankr_available:
-        return {}
+        raise RuntimeError('Ankr端点暂不可用')
+    last_error = None
     for attempt in range(retries):
         try:
             resp = req.post(ANKR_URL, json={
                 "jsonrpc": "2.0", "method": method, "params": params, "id": 1
             }, timeout=15)
+            resp.raise_for_status()
             data = resp.json()
             if 'error' in data:
+                last_error = RuntimeError('Ankr返回RPC错误')
                 err_msg = str(data.get('error', {}).get('message', ''))
                 if 'No nodes available' in err_msg:
                     _ankr_available = False
                     _ankr_fail_ts = time.time()
-                    return {}
+                    break
                 time.sleep(1 + attempt)
                 continue
             return data.get('result', {})
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             time.sleep(1 + attempt)
     _ankr_available = False
     _ankr_fail_ts = time.time()
-    return {}
+    error_type = type(last_error).__name__ if last_error else '未知错误'
+    raise RuntimeError(f'Ankr调用失败（{method}，{error_type}）') from last_error
 
 
 def _ankr_tx_to_etherscan(tx):
@@ -357,16 +362,44 @@ def _ankr_tx_to_etherscan(tx):
         'contractAddress': tx.get('contractAddress', '').lower(),
         'tokenDecimal': str(decimals),
         'timeStamp': str(ts_val),
+        'blockNumber': str(tx.get('blockNumber', '') or ''),
+        'transactionIndex': str(tx.get('transactionIndex', '') or ''),
+        'logIndex': str(tx.get('logIndex', '') or ''),
     }
+
+
+def _int_position(value, default=(1 << 62)):
+    try:
+        if isinstance(value, str) and value.startswith('0x'):
+            return int(value, 16)
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _tx_chain_sort_key(tx):
+    """优先按真实链上位置排序；位置缺失时才回退时间戳和 hash。"""
+    block = _int_position(tx.get('blockNumber'))
+    if block != (1 << 62):
+        return (
+            0, block,
+            _int_position(tx.get('transactionIndex'), 0),
+            _int_position(tx.get('logIndex'), 0),
+            (tx.get('hash') or '').lower(),
+        )
+    return (
+        1, _int_position(tx.get('timeStamp'), 0),
+        (tx.get('hash') or '').lower(), 0, '',
+    )
 
 
 
 def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
-    """Fetch token transfers. 主通道 Ankr Advanced API → 兜底 Ankr RPC getLogs。"""
-    results = _fetch_token_txs_ankr(addr, ts_start, ts_end, contract)
-    if results or _ankr_available:
-        return results
-    return _fetch_token_txs_getlogs(addr, ts_start, ts_end, contract)
+    """抓 token 转账；Ankr 任意页失败时丢弃部分结果并完整回退 getLogs。"""
+    try:
+        return _fetch_token_txs_ankr(addr, ts_start, ts_end, contract)
+    except Exception:
+        return _fetch_token_txs_getlogs(addr, ts_start, ts_end, contract)
 
 
 def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
@@ -443,11 +476,11 @@ def _fetch_token_txs_getlogs(addr, ts_start, ts_end, contract=None):
 
 
 def _fetch_normal_txs(addr, ts_start, ts_end, api_keys=None):
-    """Fetch normal (BNB) transactions. 主通道 Ankr Advanced API → 空（BNB gas 影响小）。"""
-    results = _fetch_normal_txs_ankr(addr, ts_start, ts_end)
-    if results or _ankr_available:
-        return results
-    return _fetch_normal_txs_empty(addr, ts_start, ts_end)
+    """抓普通交易；数据源失败返回 None，由上层明确报错而不是显示零 Gas。"""
+    try:
+        return _fetch_normal_txs_ankr(addr, ts_start, ts_end)
+    except Exception:
+        return None
 
 
 def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
@@ -559,41 +592,59 @@ def _get_bnb_price():
 
 
 def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
-    """U 算法：按切换日只统计 QUQ 或 QQQB 中的一个币种，禁止两者叠加。"""
+    """U 算法：同时汇总 QUQ 与 QQQB 的真实 swap，并保留原返现修正口径。"""
     a_lower = addr.lower()
-    token_key, token_contract = traded_token_for_window(ts_start)
-    token_symbol = token_key.upper()
+    active_tokens = traded_tokens_for_window(ts_start)
+    token_symbol = 'QUQ+QQQB'
+    token_contract = f'{QUQ},{QQQB}'
+    last_error = None
     for attempt in range(retries):
         try:
             all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, contract=USDT)
-            all_token = _fetch_all_token_txs(addr, ts_start, ts_end, contract=token_contract)
+            all_token_txs = {
+                symbol: _fetch_all_token_txs(addr, ts_start, ts_end, contract=contract)
+                for symbol, contract in active_tokens.items()
+            }
             all_normal = _fetch_normal_txs(addr, ts_start, ts_end)
+            if all_normal is None:
+                raise RuntimeError('普通交易数据源不可用，无法核对 Gas')
 
             by_hash = {}
+
+            def ensure_hash(hash_):
+                by_hash.setdefault(hash_, {
+                    'usdt_in': 0.0,
+                    'usdt_out': 0.0,
+                    'tokens': {symbol: {'in': 0.0, 'out': 0.0} for symbol in active_tokens},
+                })
+
             for tx in all_usdt:
                 h = tx['hash'].lower()
                 frm, to = tx['from'].lower(), tx['to'].lower()
                 val = float(tx['value']) / 1e18
-                by_hash.setdefault(h, {'usdt_in': 0, 'usdt_out': 0, 'token_in': 0, 'token_out': 0})
+                ensure_hash(h)
                 if to == a_lower:
                     by_hash[h]['usdt_in'] += val
                 if frm == a_lower:
                     by_hash[h]['usdt_out'] += val
-            for tx in all_token:
-                h = tx['hash'].lower()
-                frm, to = tx['from'].lower(), tx['to'].lower()
-                val = float(tx['value']) / 1e18
-                by_hash.setdefault(h, {'usdt_in': 0, 'usdt_out': 0, 'token_in': 0, 'token_out': 0})
-                if to == a_lower:
-                    by_hash[h]['token_in'] += val
-                if frm == a_lower:
-                    by_hash[h]['token_out'] += val
+            for symbol, token_txs in all_token_txs.items():
+                for tx in token_txs:
+                    h = tx['hash'].lower()
+                    frm, to = tx['from'].lower(), tx['to'].lower()
+                    val = float(tx['value']) / 1e18
+                    ensure_hash(h)
+                    if to == a_lower:
+                        by_hash[h]['tokens'][symbol]['in'] += val
+                    if frm == a_lower:
+                        by_hash[h]['tokens'][symbol]['out'] += val
 
             buy, sell = 0.0, 0.0
             swap_hashes = set()
             for h, values in by_hash.items():
-                is_buy = values['token_in'] > 0 and values['usdt_out'] > 0
-                is_sell = values['token_out'] > 0 and values['usdt_in'] > 0
+                has_token_in = any(flow['in'] > 0 for flow in values['tokens'].values())
+                has_token_out = any(flow['out'] > 0 for flow in values['tokens'].values())
+                is_buy = has_token_in and values['usdt_out'] > 0
+                is_sell = has_token_out and values['usdt_in'] > 0
                 if not (is_buy or is_sell):
                     continue
                 swap_hashes.add(h)
@@ -650,6 +701,7 @@ def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
                 'fullAddr': addr,
                 'token_symbol': token_symbol,
                 'token_contract': token_contract,
+                'token_contracts': dict(active_tokens),
                 'usdt_in': buy,
                 'usdt_out': sell,
                 'total_usdt': buy + sell,
@@ -662,72 +714,54 @@ def query_address(addr, ts_start, ts_end, api_keys=None, retries=3):
                 'v_pancake': v_pancake,
                 'v_other': v_other,
             }
-        except Exception:
-            pass
+        except Exception as exc:
+            last_error = exc
         time.sleep(0.5)
-    return {
-        'addr': a_lower, 'fullAddr': addr, 'token_symbol': token_symbol,
-        'token_contract': token_contract, 'usdt_in': 0, 'usdt_out': 0,
-        'total_usdt': 0, 'wear': 0, 'points': 0, 'bnb_tx_count': 0,
-        'bnb_gas_used': 0, 'v_lifi': 0, 'v_liquidmesh': 0,
-        'v_pancake': 0, 'v_other': 0,
-    }
+    error_type = type(last_error).__name__ if last_error else '未知错误'
+    raise RuntimeError(f'地址 {a_lower[:10]}… 双币交易数据获取失败（{error_type}）') from last_error
 
 
 # --- Balance queries via RPC ---
 
 def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
-    """真实磨损算法：按切换日选择唯一币种；QQQB 不套用旧 QUQ 本金修正。"""
+    """真实磨损算法：双币交易统一汇总，QUQ 专属修正与 QQQB 完全隔离。"""
     a_lower = addr.lower()
-    token_key, token_contract = traded_token_for_window(ts_start)
-    token_symbol = token_key.upper()
-    token_price = get_quq_price() if token_key == 'quq' else 0.0
+    active_tokens = traded_tokens_for_window(ts_start)
+    token_symbol = 'QUQ+QQQB'
+    token_contract = f'{QUQ},{QQQB}'
+    token_price = get_quq_price()
+    last_error = None
+
     for attempt in range(retries):
         try:
             all_usdt = _fetch_all_token_txs(addr, ts_start, ts_end, contract=USDT)
-            all_token = _fetch_all_token_txs(addr, ts_start, ts_end, contract=token_contract)
+            all_token = []
+            for contract in active_tokens.values():
+                all_token.extend(_fetch_all_token_txs(addr, ts_start, ts_end, contract=contract))
             all_normal = _fetch_normal_txs(addr, ts_start, ts_end)
+            if all_normal is None:
+                raise RuntimeError('普通交易数据源不可用，无法核对 Gas')
 
             by_hash = {}
             for tx in all_usdt + all_token:
                 h = tx['hash'].lower()
                 by_hash.setdefault(h, []).append(tx)
+            ordered_hashes = sorted(
+                by_hash,
+                key=lambda h: min(_tx_chain_sort_key(tx) for tx in by_hash[h]),
+            )
 
-            ordered_hashes = sorted(by_hash.keys(), key=lambda h: int(by_hash[h][0]['timeStamp']))
-
+            events = []
             swap_hashes = []
             for h in ordered_hashes:
-                ui = uo = token_in = token_out = 0.0
+                ui = uo = 0.0
+                flows = {
+                    'quq': {'in': 0.0, 'out': 0.0},
+                    'qqqb': {'in': 0.0, 'out': 0.0},
+                }
+                principal_quq_in = 0.0
+                relay_quq_out = 0.0
                 for tx in by_hash[h]:
-                    val = float(tx['value']) / 1e18
-                    ca = tx['contractAddress'].lower()
-                    if tx['to'].lower() == a_lower:
-                        if ca == USDT:
-                            ui += val
-                        elif ca == token_contract:
-                            token_in += val
-                    elif tx['from'].lower() == a_lower:
-                        if ca == USDT:
-                            uo += val
-                        elif ca == token_contract:
-                            token_out += val
-                if (token_in > 0 and uo > 0) or (token_out > 0 and ui > 0):
-                    swap_hashes.append(h)
-            prewarm_vendor_cache(swap_hashes)
-
-            swap_sell_usdt = swap_buy_usdt = 0.0
-            relay_qout = 0.0
-            principal_usd = 0.0
-            principal_n = 0
-            first_sell_swap_ui = 0.0
-            v_lifi = v_lm = v_pancake = v_other = 0
-
-            for h in ordered_hashes:
-                items = by_hash[h]
-                ui = uo = token_in = token_out = 0.0
-                src_token = None
-                relay_out_in_hash = 0.0
-                for tx in items:
                     val = float(tx['value']) / 1e18
                     ca = tx['contractAddress'].lower()
                     fa = tx['from'].lower()
@@ -735,28 +769,86 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                     if ta == a_lower:
                         if ca == USDT:
                             ui += val
-                        elif ca == token_contract:
-                            token_in += val
-                            src_token = fa
+                        elif ca == QUQ:
+                            if fa == PRINCIPAL_SRC:
+                                principal_quq_in += val
+                            else:
+                                flows['quq']['in'] += val
+                        elif ca == QQQB:
+                            flows['qqqb']['in'] += val
                     elif fa == a_lower:
                         if ca == USDT:
                             uo += val
-                        elif ca == token_contract:
-                            token_out += val
+                        elif ca == QUQ:
+                            flows['quq']['out'] += val
                             if ta == TEAM_RELAY:
-                                relay_out_in_hash += val
+                                relay_quq_out += val
+                        elif ca == QQQB:
+                            flows['qqqb']['out'] += val
 
-                is_buy = token_in > 0 and uo > 0
-                is_sell = token_out > 0 and ui > 0
+                quq_buy = flows['quq']['in'] > 0 and uo > 0
+                quq_sell = flows['quq']['out'] > 0 and ui > 0
+                qqqb_buy = flows['qqqb']['in'] > 0 and uo > 0
+                qqqb_sell = flows['qqqb']['out'] > 0 and ui > 0
+                is_buy = quq_buy or qqqb_buy
+                is_sell = quq_sell or qqqb_sell
                 is_swap = is_buy or is_sell
                 if is_swap:
-                    if is_buy:
-                        swap_buy_usdt += uo
-                    if is_sell:
-                        swap_sell_usdt += ui
-                    if is_sell and first_sell_swap_ui == 0.0:
-                        first_sell_swap_ui = ui
-                    vendor = classify_swap_vendor(h)
+                    swap_hashes.append(h)
+                events.append({
+                    'hash': h,
+                    'ui': ui,
+                    'uo': uo,
+                    'quq_buy': quq_buy,
+                    'quq_sell': quq_sell,
+                    'qqqb_buy': qqqb_buy,
+                    'qqqb_sell': qqqb_sell,
+                    'is_buy': is_buy,
+                    'is_sell': is_sell,
+                    'is_swap': is_swap,
+                    'principal_quq_in': principal_quq_in,
+                    'relay_quq_out': relay_quq_out,
+                })
+
+            prewarm_vendor_cache(swap_hashes)
+            swap_sell_usdt = swap_buy_usdt = 0.0
+            quq_sell_usdt = quq_buy_usdt = 0.0
+            relay_qout = 0.0
+            principal_usd = 0.0
+            principal_n = 0
+            first_quq_sell_ui = 0.0
+            v_lifi = v_lm = v_pancake = v_other = 0
+
+            for event in events:
+                ui, uo = event['ui'], event['uo']
+                if event['is_buy']:
+                    swap_buy_usdt += uo
+                if event['is_sell']:
+                    swap_sell_usdt += ui
+
+                # 只有该 hash 的 swap 明确只属于 QUQ 时，才纳入 QUQ 专属修正分量。
+                has_quq_swap = event['quq_buy'] or event['quq_sell']
+                has_qqqb_swap = event['qqqb_buy'] or event['qqqb_sell']
+                if has_quq_swap and not has_qqqb_swap:
+                    if event['quq_buy']:
+                        quq_buy_usdt += uo
+                    if event['quq_sell']:
+                        quq_sell_usdt += ui
+                        if first_quq_sell_ui == 0.0:
+                            first_quq_sell_ui = ui
+
+                principal_quq_in = event['principal_quq_in']
+                if principal_quq_in > 0:
+                    usd = principal_quq_in * token_price
+                    if usd > PRINCIPAL_MIN_USD and principal_quq_in < PRINCIPAL_MAX_QUQ:
+                        principal_usd += usd
+                        principal_n += 1
+
+                if not event['is_swap']:
+                    relay_qout += event['relay_quq_out']
+
+                if event['is_swap']:
+                    vendor = classify_swap_vendor(event['hash'])
                     if vendor == 'LiFi':
                         v_lifi += 1
                     elif vendor == 'Liquidmesh':
@@ -765,23 +857,21 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                         v_pancake += 1
                     else:
                         v_other += 1
-                elif token_key == 'quq':
-                    relay_qout += relay_out_in_hash
-                    if token_in > 0 and src_token == PRINCIPAL_SRC:
-                        usd = token_in * token_price
-                        if usd > PRINCIPAL_MIN_USD and token_in < PRINCIPAL_MAX_QUQ:
-                            principal_usd += usd
-                            principal_n += 1
 
             wear_v4 = swap_sell_usdt - swap_buy_usdt
-            skip_principal = token_key == 'quq' and relay_qout >= RELAY_SKIP_QUQ and principal_n > 0
+            quq_wear_v4 = quq_sell_usdt - quq_buy_usdt
+            other_wear_v4 = wear_v4 - quq_wear_v4
+            skip_principal = relay_qout >= RELAY_SKIP_QUQ and principal_n > 0
             principal_kept = 0.0 if skip_principal else principal_usd
-            wear_v6 = wear_v4 - principal_kept
+            # 本金只允许修正明确存在的 QUQ 交易分量；纯 QQQB 交易不能被 QUQ 本金抵扣。
+            principal_applied = principal_kept if (quq_buy_usdt > 0 or quq_sell_usdt > 0) else 0.0
+            quq_wear_v6 = quq_wear_v4 - principal_applied
 
             quq_sell_stripped = 0.0
-            if token_key == 'quq' and wear_v6 > 0 and first_sell_swap_ui > 0:
-                quq_sell_stripped = min(wear_v6, first_sell_swap_ui)
-                wear_v6 -= quq_sell_stripped
+            if quq_wear_v6 > 0 and first_quq_sell_ui > 0:
+                quq_sell_stripped = min(quq_wear_v6, first_quq_sell_ui)
+                quq_wear_v6 -= quq_sell_stripped
+            wear_v6 = other_wear_v4 + quq_wear_v6
 
             bnb_tx_count = 0
             bnb_gas_used = 0.0
@@ -798,11 +888,14 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                 'algo': 'token_v6',
                 'token_symbol': token_symbol,
                 'token_contract': token_contract,
+                'token_contracts': dict(active_tokens),
                 'usdt_in': swap_buy_usdt,
                 'usdt_out': swap_sell_usdt,
                 'total_usdt': swap_buy_usdt + swap_sell_usdt,
                 'wear_v4': wear_v4,
+                'quq_wear_v4': quq_wear_v4,
                 'principal_kept': principal_kept,
+                'principal_applied': principal_applied,
                 'principal_n': principal_n,
                 'principal_skipped': skip_principal,
                 'relay_qout': relay_qout,
@@ -818,28 +911,24 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                 'v_pancake': v_pancake,
                 'v_other': v_other,
             }
-        except Exception:
-            pass
+        except Exception as exc:
+            last_error = exc
         time.sleep(0.5)
-    return {
-        'addr': a_lower, 'fullAddr': addr, 'algo': 'token_v6',
-        'token_symbol': token_symbol, 'token_contract': token_contract,
-        'usdt_in': 0, 'usdt_out': 0, 'total_usdt': 0,
-        'wear_v4': 0, 'principal_kept': 0,
-        'principal_n': 0, 'principal_skipped': False, 'relay_qout': 0,
-        'quq_sell_stripped': 0, 'wear': 0, 'points': 0,
-        'bnb_tx_count': 0, 'bnb_gas_used': 0, 'quq_price': token_price,
-        'token_price': token_price,
-        'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0,
-    }
+
+    error_type = type(last_error).__name__ if last_error else '未知错误'
+    raise RuntimeError(f'地址 {a_lower[:10]}… 双币真实磨损数据获取失败（{error_type}）') from last_error
 
 
 # --- Balance queries via RPC ---
 
 def _rpc_call(method, params):
-    """Call BSC JSON-RPC."""
+    """调用 BSC JSON-RPC；网络或 RPC 错误必须显式抛出，不能伪装为零余额。"""
     r = req.post(BSC_RPC, json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1}, timeout=15)
-    return r.json().get('result')
+    r.raise_for_status()
+    body = r.json()
+    if body.get('error') or body.get('result') is None:
+        raise RuntimeError(f'BSC RPC 调用失败：{method}')
+    return body['result']
 
 
 def _erc20_balance(token_contract, wallet_addr):
@@ -848,30 +937,35 @@ def _erc20_balance(token_contract, wallet_addr):
     padded = wallet_addr.lower().replace('0x', '').zfill(64)
     data = '0x70a08231' + padded
     result = _rpc_call('eth_call', [{'to': token_contract, 'data': data}, 'latest'])
-    if result:
-        return int(result, 16) / 1e18
-    return 0.0
+    return int(result, 16) / 1e18
 
 
 def _bnb_balance(wallet_addr):
     """Get native BNB balance."""
     result = _rpc_call('eth_getBalance', [wallet_addr, 'latest'])
-    if result:
-        return int(result, 16) / 1e18
-    return 0.0
+    return int(result, 16) / 1e18
 
 
 def query_balances(addr):
-    """查询 USDT、USDC、USD1、QQQB 和 BNB 余额。"""
-    return {
-        'addr': addr.lower(),
-        'fullAddr': addr,
-        'usdt': _erc20_balance(USDT, addr),
-        'usdc': _erc20_balance(USDC, addr),
-        'usd1': _erc20_balance(USD1, addr),
-        'qqqb': _erc20_balance(QQQB, addr),
-        'bnb': _bnb_balance(addr),
+    """查询 USDT、USDC、USD1、QUQ、QQQB 和 BNB 余额；单币失败保留其他币结果。"""
+    queries = {
+        'usdt': lambda: _erc20_balance(USDT, addr),
+        'usdc': lambda: _erc20_balance(USDC, addr),
+        'usd1': lambda: _erc20_balance(USD1, addr),
+        'quq': lambda: _erc20_balance(QUQ, addr),
+        'qqqb': lambda: _erc20_balance(QQQB, addr),
+        'bnb': lambda: _bnb_balance(addr),
     }
+    result = {'addr': addr.lower(), 'fullAddr': addr}
+    errors = []
+    for name, fn in queries.items():
+        try:
+            result[name] = fn()
+        except Exception as exc:
+            result[name] = None
+            errors.append(f'{name}:{type(exc).__name__}')
+    result['balance_error'] = '，'.join(errors) if errors else None
+    return result
 
 
 # --- 并发批量扫描 ---
@@ -881,16 +975,19 @@ BATCH_CONCURRENCY = max(1, int(os.environ.get('BATCH_CONCURRENCY', '8')))
 
 
 def _scan_one(addr, ts_start, ts_end, include_balances=False, algo='u'):
-    """扫描单个地址（含余额），供并发调用。"""
+    """扫描单个地址；余额失败只标记余额，不覆盖已经成功的交易结果。"""
     scan_fn = query_address_quq_v6 if algo in ('quq', 'qqqb') else query_address
     r = scan_fn(addr, ts_start, ts_end)
     if include_balances:
-        bal = query_balances(addr)
-        r['usdt_bal'] = bal['usdt']
-        r['usdc_bal'] = bal['usdc']
-        r['usd1_bal'] = bal['usd1']
-        r['qqqb_bal'] = bal['qqqb']
-        r['bnb_bal'] = bal['bnb']
+        try:
+            bal = query_balances(addr)
+            for name in ('usdt', 'usdc', 'usd1', 'quq', 'qqqb', 'bnb'):
+                r[f'{name}_bal'] = bal.get(name)
+            r['balance_error'] = bal.get('balance_error')
+        except Exception as exc:
+            for name in ('usdt', 'usdc', 'usd1', 'quq', 'qqqb', 'bnb'):
+                r[f'{name}_bal'] = None
+            r['balance_error'] = f'余额查询失败：{type(exc).__name__}'
     return r
 
 
@@ -906,6 +1003,7 @@ def scan_batch(addresses, ts_start, ts_end, include_balances=False, algo='u',
     pending = set()
     future_to_idx = {}
     cancelled = False
+    errors = []
 
     try:
         for i, addr in enumerate(addresses):
@@ -926,16 +1024,8 @@ def scan_batch(addresses, ts_start, ts_end, include_balances=False, algo='u',
                 idx = future_to_idx[f]
                 try:
                     results[idx] = f.result()
-                except Exception:
-                    # 失败时返回空结果
-                    results[idx] = {
-                        'addr': addresses[idx].lower(),
-                        'fullAddr': addresses[idx],
-                        'usdt_in': 0, 'usdt_out': 0, 'total_usdt': 0,
-                        'wear': 0, 'points': 0,
-                        'bnb_tx_count': 0, 'bnb_gas_used': 0,
-                        'v_lifi': 0, 'v_liquidmesh': 0, 'v_pancake': 0, 'v_other': 0,
-                    }
+                except Exception as exc:
+                    errors.append((idx, type(exc).__name__))
                 done_count += 1
                 if progress_cb:
                     progress_cb(done_count)
@@ -949,4 +1039,9 @@ def scan_batch(addresses, ts_start, ts_end, include_balances=False, algo='u',
 
     if cancelled:
         raise RuntimeError('扫描已取消或超时')
+    if errors:
+        first_idx, error_type = errors[0]
+        raise RuntimeError(
+            f'{len(errors)} 个地址扫描失败；首个地址 {addresses[first_idx][:10]}…（{error_type}）'
+        )
     return results

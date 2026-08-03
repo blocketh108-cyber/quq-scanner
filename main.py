@@ -1,4 +1,4 @@
-"""FastAPI web service for QQQB/USDT public scanning."""
+"""FastAPI web service for combined QUQ + QQQB/USDT scanning."""
 import os, re, uuid, time, threading, json
 from datetime import datetime
 from typing import Optional
@@ -10,13 +10,17 @@ from pydantic import BaseModel
 from scanner import trading_window, query_address, query_address_quq_v6, query_balances, _get_bnb_price, get_quq_price, scan_batch, ANKR_URL, _ankr_available
 import scanner as _scanner_mod
 
-app = FastAPI(title="QQQB/USDT Scanner")
+app = FastAPI(title="QUQ + QQQB/USDT Scanner")
 
 
 @app.on_event("startup")
 def _probe_ankr_on_startup():
     """启动时探测 Ankr 可用性，避免第一个扫描请求浪费 15 秒超时"""
     import requests, threading
+    if not ANKR_URL:
+        _scanner_mod._ankr_available = False
+        _scanner_mod._ankr_fail_ts = time.time()
+        return
     def _probe():
         try:
             r = requests.post(ANKR_URL, json={
@@ -232,10 +236,10 @@ def _run_scan(task_id: str, addresses: list[str], day: Optional[str], include_ba
 def health():
     _mark_stale_tasks()
     return {
-        "keys_loaded": 0,
+        "ankr_configured": bool(ANKR_URL),
         "api": "ankr+rpc_fallback",
         "max_addresses": MAX_ADDRESSES,
-        "version": "2.3-qqqb-switch",
+        "version": "2.4-dual-token",
         "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
         "task_stale_seconds": TASK_STALE_SECONDS,
         "task_max_seconds": TASK_MAX_SECONDS,
