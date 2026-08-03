@@ -1,6 +1,7 @@
 """Core scanning logic extracted from quq-monitor.py for public web service.
 Migrated from Etherscan V2 to Ankr Advanced API (2026-04-20)."""
 import math, time, random, os
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import requests as req
@@ -183,13 +184,22 @@ def _receipt_log_addresses(txhash):
     return addrs
 
 
+BLOCK_TIME_ANCHOR_TS = 1780315365
+BLOCK_TIME_ANCHOR_HEIGHT = 101686331
+BSC_ESTIMATED_BLOCK_SECONDS = 0.45
+
+
 def _ts_to_block(ts):
-    """时间戳转 BSC block number（估算，BSC 当前约 0.45s/block）"""
-    # 精确锚点：block 101686331 = ts 1780315365 (2026-06-01 19:29 CST)
-    anchor_ts = 1780315365
-    anchor_block = 101686331
-    diff = ts - anchor_ts
-    return max(0, anchor_block + int(diff / 0.45))
+    """按统一锚点将时间戳估算为 BSC 区块号。"""
+    diff = ts - BLOCK_TIME_ANCHOR_TS
+    return max(0, BLOCK_TIME_ANCHOR_HEIGHT + int(diff / BSC_ESTIMATED_BLOCK_SECONDS))
+
+
+def _block_to_ts(block_num):
+    """使用与 _ts_to_block 完全相同的锚点和块时长反推时间戳。"""
+    return int(BLOCK_TIME_ANCHOR_TS + (
+        block_num - BLOCK_TIME_ANCHOR_HEIGHT
+    ) * BSC_ESTIMATED_BLOCK_SECONDS)
 
 
 def _get_block_by_ts(ts, closest='before'):
@@ -275,8 +285,8 @@ def _logs_to_etherscan_format(logs, contract, decimals=18):
             block_num = int(block_hex, 16)
         except (ValueError, TypeError):
             block_num = 0
-        # 用 block number 估算时间戳
-        ts_est = 1780162099 + (block_num - 101346147) * 3
+        # 与时间转区块函数使用同一锚点，避免兜底日志被错误时间过滤。
+        ts_est = _block_to_ts(block_num)
 
         results.append({
             'hash': log.get('transactionHash', ''),
@@ -316,16 +326,27 @@ def _ankr_post(method, params, retries=2):
             }, timeout=15)
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, dict):
+                last_error = RuntimeError('Ankr返回的JSON-RPC响应不是对象')
+                time.sleep(1 + attempt)
+                continue
             if 'error' in data:
                 last_error = RuntimeError('Ankr返回RPC错误')
-                err_msg = str(data.get('error', {}).get('message', ''))
+                err = data.get('error')
+                if not isinstance(err, dict):
+                    err = {}
+                err_msg = str(err.get('message', ''))
                 if 'No nodes available' in err_msg:
                     _ankr_available = False
                     _ankr_fail_ts = time.time()
                     break
                 time.sleep(1 + attempt)
                 continue
-            return data.get('result', {})
+            if 'result' not in data or not isinstance(data['result'], dict):
+                last_error = RuntimeError('Ankr响应缺少有效result对象')
+                time.sleep(1 + attempt)
+                continue
+            return data['result']
         except Exception as exc:
             last_error = exc
             time.sleep(1 + attempt)
@@ -362,7 +383,7 @@ def _ankr_tx_to_etherscan(tx):
         'contractAddress': tx.get('contractAddress', '').lower(),
         'tokenDecimal': str(decimals),
         'timeStamp': str(ts_val),
-        'blockNumber': str(tx.get('blockNumber', '') or ''),
+        'blockNumber': str(tx.get('blockNumber') or tx.get('blockHeight') or ''),
         'transactionIndex': str(tx.get('transactionIndex', '') or ''),
         'logIndex': str(tx.get('logIndex', '') or ''),
     }
@@ -393,6 +414,51 @@ def _tx_chain_sort_key(tx):
     )
 
 
+def _fill_hash_position_from_receipt(txs):
+    """同区块排序信息不完整时，用交易回执补齐区块号和交易序号。"""
+    if not txs:
+        raise RuntimeError('待排序交易为空')
+    has_block = any(_int_position(tx.get('blockNumber')) != (1 << 62) for tx in txs)
+    has_tx_index = any(_int_position(tx.get('transactionIndex')) != (1 << 62) for tx in txs)
+    if has_block and has_tx_index:
+        return
+    tx_hash = next(((tx.get('hash') or '').lower() for tx in txs if tx.get('hash')), '')
+    if not tx_hash:
+        raise RuntimeError('交易缺少哈希，无法补齐链上顺序')
+    receipt = _rpc_call('eth_getTransactionReceipt', [tx_hash])
+    if not isinstance(receipt, dict):
+        raise RuntimeError('交易回执不可用，无法补齐链上顺序')
+    block = _int_position(receipt.get('blockNumber'))
+    tx_index = _int_position(receipt.get('transactionIndex'))
+    if block == (1 << 62) or tx_index == (1 << 62):
+        raise RuntimeError('交易回执缺少链上位置')
+    for tx in txs:
+        tx['blockNumber'] = str(block)
+        tx['transactionIndex'] = str(tx_index)
+
+
+def _fill_ambiguous_quq_sell_positions(events, by_hash):
+    """只为同区块或同秒冲突的 QUQ 卖出候选补查询回执。"""
+    candidates = [event for event in events if event.get('quq_sell', 0) > 0]
+    if len(candidates) < 2:
+        return
+    groups = defaultdict(list)
+    for event in candidates:
+        txs = by_hash[event['hash']]
+        blocks = [_int_position(tx.get('blockNumber')) for tx in txs]
+        valid_blocks = [block for block in blocks if block != (1 << 62)]
+        if valid_blocks:
+            group_key = ('block', min(valid_blocks))
+        else:
+            group_key = ('timestamp', min(_int_position(tx.get('timeStamp'), 0) for tx in txs))
+        groups[group_key].append(event)
+    for tied in groups.values():
+        if len(tied) < 2:
+            continue
+        for event in tied:
+            _fill_hash_position_from_receipt(by_hash[event['hash']])
+
+
 
 def _fetch_all_token_txs(addr, ts_start, ts_end, api_keys=None, contract=None):
     """抓 token 转账；Ankr 任意页失败时丢弃部分结果并完整回退 getLogs。"""
@@ -406,6 +472,7 @@ def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
     """通过 Ankr 拉 token 转账"""
     results = []
     page_token = None
+    seen_page_tokens = set()
     for _ in range(200):  # safety limit
         params = {
             "blockchain": ["bsc"],
@@ -418,11 +485,18 @@ def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
         if contract:
             params["contractAddress"] = contract
         if page_token:
+            if page_token in seen_page_tokens:
+                raise RuntimeError('Ankr token 分页令牌重复')
+            seen_page_tokens.add(page_token)
             params["pageToken"] = page_token
 
         result = _ankr_post("ankr_getTokenTransfers", params)
-        transfers = result.get('transfers', []) or []
+        if 'transfers' not in result or not isinstance(result['transfers'], list):
+            raise RuntimeError('Ankr token 响应缺少 transfers 数组')
+        transfers = result['transfers']
         if not transfers:
+            if result.get('nextPageToken'):
+                raise RuntimeError('Ankr token 空分页仍返回下一页令牌')
             break
 
         for tx in transfers:
@@ -438,6 +512,8 @@ def _fetch_token_txs_ankr(addr, ts_start, ts_end, contract=None):
         if not page_token:
             break
         time.sleep(0.1)
+    else:
+        raise RuntimeError('Ankr token 分页超过安全上限')
 
     return results
 
@@ -487,6 +563,7 @@ def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
     """通过 Ankr 拉 BNB 交易"""
     results = []
     page_token = None
+    seen_page_tokens = set()
     for _ in range(200):
         params = {
             "blockchain": "bsc",
@@ -497,11 +574,18 @@ def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
             "descOrder": True,
         }
         if page_token:
+            if page_token in seen_page_tokens:
+                raise RuntimeError('Ankr 普通交易分页令牌重复')
+            seen_page_tokens.add(page_token)
             params["pageToken"] = page_token
 
         result = _ankr_post("ankr_getTransactionsByAddress", params)
-        txs = result.get('transactions', []) or []
+        if 'transactions' not in result or not isinstance(result['transactions'], list):
+            raise RuntimeError('Ankr 普通交易响应缺少 transactions 数组')
+        txs = result['transactions']
         if not txs:
+            if result.get('nextPageToken'):
+                raise RuntimeError('Ankr 普通交易空分页仍返回下一页令牌')
             break
 
         for tx in txs:
@@ -543,6 +627,8 @@ def _fetch_normal_txs_ankr(addr, ts_start, ts_end):
         if not page_token:
             break
         time.sleep(0.1)
+    else:
+        raise RuntimeError('Ankr 普通交易分页超过安全上限')
 
     return results
 
@@ -810,6 +896,10 @@ def query_address_quq_v6(addr, ts_start, ts_end, retries=3):
                     'relay_quq_out': relay_quq_out,
                 })
 
+            _fill_ambiguous_quq_sell_positions(events, by_hash)
+            events.sort(key=lambda event: min(
+                _tx_chain_sort_key(tx) for tx in by_hash[event['hash']]
+            ))
             prewarm_vendor_cache(swap_hashes)
             swap_sell_usdt = swap_buy_usdt = 0.0
             quq_sell_usdt = quq_buy_usdt = 0.0

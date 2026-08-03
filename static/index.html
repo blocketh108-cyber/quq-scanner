@@ -166,7 +166,7 @@ function fmtBal(v){
   return Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4});
 }
 function pickBal(r,fresh,legacy){
-  return Object.prototype.hasOwnProperty.call(r,fresh)?r[fresh]:(Object.prototype.hasOwnProperty.call(r,legacy)?r[legacy]:0);
+  return Object.prototype.hasOwnProperty.call(r,fresh)?r[fresh]:(Object.prototype.hasOwnProperty.call(r,legacy)?r[legacy]:null);
 }
 
 function getAddresses(){

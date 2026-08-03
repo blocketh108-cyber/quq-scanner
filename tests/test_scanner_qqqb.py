@@ -169,6 +169,59 @@ class QqqbSwitchTests(unittest.TestCase):
         self.assertEqual(row['quq_sell_stripped'], 100)
         self.assertEqual(row['wear'], 30)
 
+    def test_Ankr真实blockHeight字段必须映射为区块号(self):
+        converted = scanner._ankr_tx_to_etherscan({
+            'transactionHash': '0xreal',
+            'fromAddress': ROUTER,
+            'toAddress': ADDR,
+            'contractAddress': scanner.QUQ,
+            'timestamp': POST_START + 10,
+            'valueRawInteger': str(10**18),
+            'tokenDecimals': 18,
+            'blockHeight': 123456,
+        })
+        self.assertEqual(converted['blockNumber'], '123456')
+
+    def test_同区块Ankr缺少交易序号时必须用回执排序(self):
+        def ankr_row(hash_, contract, from_, to, amount):
+            return scanner._ankr_tx_to_etherscan({
+                'transactionHash': hash_, 'fromAddress': from_, 'toAddress': to,
+                'contractAddress': contract, 'timestamp': POST_START + 10,
+                'valueRawInteger': str(int(amount * 1e18)), 'tokenDecimals': 18,
+                'blockHeight': 100,
+            })
+
+        transfers = {
+            scanner.USDT: [
+                ankr_row('0xaa', scanner.USDT, ROUTER, ADDR, 30),
+                ankr_row('0xzz', scanner.USDT, ROUTER, ADDR, 100),
+            ],
+            scanner.QUQ: [
+                ankr_row('0xaa', scanner.QUQ, ADDR, ROUTER, 2),
+                ankr_row('0xzz', scanner.QUQ, ADDR, ROUTER, 5),
+            ],
+            scanner.QQQB: [],
+        }
+
+        def receipt(method, params):
+            self.assertEqual(method, 'eth_getTransactionReceipt')
+            return {
+                'blockNumber': '0x64',
+                'transactionIndex': '0x1' if params[0] == '0xzz' else '0x2',
+                'logs': [],
+            }
+
+        with patch.object(scanner, '_fetch_all_token_txs', side_effect=lambda *a, contract=None, **k: transfers[contract]), \
+             patch.object(scanner, '_fetch_normal_txs', return_value=[]), \
+             patch.object(scanner, '_rpc_call', side_effect=receipt), \
+             patch.object(scanner, 'prewarm_vendor_cache'), \
+             patch.object(scanner, 'classify_swap_vendor', return_value=None), \
+             patch.object(scanner, 'get_quq_price', return_value=0.002):
+            row = scanner.query_address_quq_v6(ADDR, POST_START, POST_START + 300, retries=1)
+
+        self.assertEqual(row['quq_sell_stripped'], 100)
+        self.assertEqual(row['wear'], 30)
+
     def test_Ankr后续分页失败不能返回部分数据(self):
         first_page = {
             'transfers': [tx('0xpage1', ROUTER, ADDR, 1, POST_START + 10, scanner.QQQB)],
@@ -183,6 +236,134 @@ class QqqbSwitchTests(unittest.TestCase):
         with patch.object(scanner, '_ankr_post', side_effect=[first_page, RuntimeError('分页失败')]):
             with self.assertRaises(RuntimeError):
                 scanner._fetch_token_txs_ankr(ADDR, POST_START, POST_START + 300, scanner.QQQB)
+
+    def test_Ankr重复分页令牌必须报错而不是返回部分数据(self):
+        page = {
+            'transfers': [{
+                'transactionHash': '0xloop', 'fromAddress': ROUTER, 'toAddress': ADDR,
+                'contractAddress': scanner.QQQB, 'timestamp': POST_START + 10,
+                'valueRawInteger': str(10**18), 'tokenDecimals': 18,
+            }],
+            'nextPageToken': '重复令牌',
+        }
+        with patch.object(scanner, '_ankr_post', return_value=page), \
+             patch.object(scanner.time, 'sleep'):
+            with self.assertRaises(RuntimeError):
+                scanner._fetch_token_txs_ankr(ADDR, POST_START, POST_START + 300, scanner.QQQB)
+
+    def test_普通交易重复分页令牌必须报错而不是返回部分Gas(self):
+        page = {
+            'transactions': [{
+                'hash': '0xloop', 'from': ADDR, 'to': ROUTER,
+                'timestamp': POST_START + 10, 'gasUsed': '21000',
+                'gasPrice': '1000000000', 'value': '0',
+            }],
+            'nextPageToken': '重复令牌',
+        }
+        with patch.object(scanner, '_ankr_post', return_value=page), \
+             patch.object(scanner.time, 'sleep'):
+            with self.assertRaises(RuntimeError):
+                scanner._fetch_normal_txs_ankr(ADDR, POST_START, POST_START + 300)
+
+    def test_RPC日志时间必须与时间转区块使用同一锚点(self):
+        block = scanner._ts_to_block(1780315365)
+        log = {
+            'transactionHash': '0xanchor',
+            'blockNumber': hex(block),
+            'logIndex': '0x1',
+            'topics': [
+                scanner.TRANSFER_TOPIC,
+                '0x' + '0' * 24 + ROUTER[2:],
+                '0x' + '0' * 24 + ADDR[2:],
+            ],
+            'data': hex(10**18),
+        }
+        row = scanner._logs_to_etherscan_format([log], scanner.QQQB)[0]
+        self.assertEqual(int(row['timeStamp']), 1780315365)
+
+    def test_Ankr_HTTP成功但缺少result必须报错(self):
+        class EmptyResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {}
+
+        with patch.object(scanner.req, 'post', return_value=EmptyResponse()), \
+             patch.object(scanner.time, 'sleep'), \
+             patch.object(scanner, 'ANKR_URL', 'https://测试.invalid'), \
+             patch.object(scanner, '_ankr_available', True), \
+             patch.object(scanner, '_ankr_fail_ts', 0):
+            with self.assertRaises(RuntimeError):
+                scanner._ankr_post('ankr_getTokenTransfers', {}, retries=1)
+
+    def test_Ankr_result缺少方法数据字段必须报错(self):
+        with patch.object(scanner, '_ankr_post', return_value={}):
+            with self.assertRaises(RuntimeError):
+                scanner._fetch_token_txs_ankr(
+                    ADDR, POST_START, POST_START + 300, scanner.QQQB
+                )
+            with self.assertRaises(RuntimeError):
+                scanner._fetch_normal_txs_ankr(ADDR, POST_START, POST_START + 300)
+
+    def test_Ankr两类接口超过200页必须报错(self):
+        token_counter = {'n': 0}
+
+        def token_page(*args, **kwargs):
+            token_counter['n'] += 1
+            return {
+                'transfers': [{
+                    'transactionHash': f"0xt{token_counter['n']}",
+                    'fromAddress': ROUTER, 'toAddress': ADDR,
+                    'contractAddress': scanner.QQQB, 'timestamp': POST_START + 10,
+                    'valueRawInteger': str(10**18), 'tokenDecimals': 18,
+                }],
+                'nextPageToken': f"token-{token_counter['n']}",
+            }
+
+        normal_counter = {'n': 0}
+
+        def normal_page(*args, **kwargs):
+            normal_counter['n'] += 1
+            return {
+                'transactions': [{
+                    'hash': f"0xn{normal_counter['n']}", 'from': ADDR, 'to': ROUTER,
+                    'timestamp': POST_START + 10, 'gasUsed': '21000',
+                    'gasPrice': '1000000000', 'value': '0',
+                }],
+                'nextPageToken': f"normal-{normal_counter['n']}",
+            }
+
+        with patch.object(scanner.time, 'sleep'):
+            with patch.object(scanner, '_ankr_post', side_effect=token_page):
+                with self.assertRaises(RuntimeError):
+                    scanner._fetch_token_txs_ankr(
+                        ADDR, POST_START, POST_START + 300, scanner.QQQB
+                    )
+            with patch.object(scanner, '_ankr_post', side_effect=normal_page):
+                with self.assertRaises(RuntimeError):
+                    scanner._fetch_normal_txs_ankr(ADDR, POST_START, POST_START + 300)
+
+    def test_RPC日志兜底不会因错误时间换算丢失真实日志(self):
+        anchor_ts = 1780315365
+        block = scanner._ts_to_block(anchor_ts)
+        log = {
+            'transactionHash': '0xfallback',
+            'blockNumber': hex(block),
+            'logIndex': '0x1',
+            'topics': [
+                scanner.TRANSFER_TOPIC,
+                '0x' + '0' * 24 + ROUTER[2:],
+                '0x' + '0' * 24 + ADDR[2:],
+            ],
+            'data': hex(10**18),
+        }
+        with patch.object(scanner, '_rpc_get_logs', side_effect=[[log], []]), \
+             patch.object(scanner.time, 'sleep'):
+            rows = scanner._fetch_token_txs_getlogs(
+                ADDR, anchor_ts - 10, anchor_ts + 10, scanner.QQQB
+            )
+        self.assertEqual([row['hash'] for row in rows], ['0xfallback'])
 
     def test_普通交易数据源失败不能显示为零Gas(self):
         transfers = {scanner.USDT: [], scanner.QUQ: [], scanner.QQQB: []}
