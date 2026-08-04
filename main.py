@@ -293,22 +293,33 @@ def bnb_price():
     return {"price": _get_bnb_price()}
 
 
-@app.post("/api/scan")
-def start_scan(req: ScanRequest):
-    _mark_stale_tasks()
-    # Validate addresses
+def _validated_unique_addresses(addresses):
+    """校验并按地址忽略大小写去重，保留首次输入的写法和顺序。"""
     addrs = []
-    for a in req.addresses:
-        a = a.strip()
-        if not a:
+    seen = set()
+    for raw in addresses:
+        addr = raw.strip()
+        if not addr:
             continue
-        if not re.fullmatch(r'0x[a-fA-F0-9]{40}', a):
-            raise HTTPException(400, f"无效地址: {a}")
-        addrs.append(a)
+        if not re.fullmatch(r'0x[a-fA-F0-9]{40}', addr):
+            raise HTTPException(400, f"无效地址: {addr}")
+        key = addr.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        addrs.append(addr)
     if not addrs:
         raise HTTPException(400, "请提供至少一个地址")
     if len(addrs) > MAX_ADDRESSES:
         raise HTTPException(400, f"最多支持 {MAX_ADDRESSES} 个地址")
+    return addrs
+
+
+@app.post("/api/scan")
+def start_scan(req: ScanRequest):
+    _mark_stale_tasks()
+    # 真正创建扫描任务前先去重，避免重复地址消耗扫描额度和 RPC 请求。
+    addrs = _validated_unique_addresses(req.addresses)
 
     algo = (req.algo or 'u').lower()
     if algo == 'quq':
@@ -416,19 +427,8 @@ def quq_price():
 
 @app.post("/api/refresh")
 def refresh_balances(req: RefreshRequest):
-    """One-shot balance refresh for up to MAX_ADDRESSES addresses (concurrent, fast)."""
-    addrs = []
-    for a in req.addresses:
-        a = a.strip()
-        if not a:
-            continue
-        if not re.fullmatch(r'0x[a-fA-F0-9]{40}', a):
-            raise HTTPException(400, f"无效地址: {a}")
-        addrs.append(a)
-    if not addrs:
-        raise HTTPException(400, "请提供至少一个地址")
-    if len(addrs) > MAX_ADDRESSES:
-        raise HTTPException(400, f"最多支持 {MAX_ADDRESSES} 个地址")
+    """One-shot balance refresh for up to MAX_ADDRESSES unique addresses."""
+    addrs = _validated_unique_addresses(req.addresses)
 
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=10) as pool:

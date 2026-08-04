@@ -170,7 +170,12 @@ function pickBal(r,fresh,legacy){
 }
 
 function getAddresses(){
-  return addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean);
+  const unique=new Map();
+  addrInput.value.trim().split(/\n/).map(l=>l.trim()).filter(Boolean).forEach(addr=>{
+    const key=addr.toLowerCase();
+    if(!unique.has(key))unique.set(key,addr);
+  });
+  return [...unique.values()];
 }
 
 // --- Single row refresh ---
